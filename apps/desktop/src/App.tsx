@@ -29,6 +29,7 @@ import { buildAppCommands } from "./commands/useAppCommands";
 import { HtmlAppEmptyState } from "./components/HtmlAppEmptyState";
 import { Settings } from "./components/Settings";
 import { type DesktopSidebarFocus, Sidebar } from "./components/Sidebar";
+import { TabBar } from "./components/TabBar";
 import { TelemetryConsentCallout } from "./components/TelemetrySection";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { Toolbar } from "./components/Toolbar";
@@ -72,6 +73,7 @@ import {
 	loadPath,
 	loadSettingsState,
 	openChangelog,
+	openPathInNewTab,
 	openWorkspace,
 	openWorkspaceWithSidebar,
 	reconcileWorkspacePath,
@@ -160,7 +162,7 @@ async function openFilePicker() {
 		undefined;
 	const selected = await desktopApi.openFilePicker({ defaultPath });
 	if (typeof selected === "string") {
-		await loadPath(selected);
+		await openPathInNewTab(selected);
 	}
 }
 
@@ -496,7 +498,7 @@ function App() {
 
 	useEffect(() => {
 		const unlisten = desktopApi.onOpenFile((path) => {
-			void loadPath(path);
+			void openPathInNewTab(path);
 		});
 		return () => {
 			unlisten();
@@ -688,6 +690,7 @@ function App() {
 						telemetryConsent === "unset")
 				}
 			/>
+			<TabBar />
 			<div className="relative flex min-h-0 flex-1 overflow-hidden">
 				{/* Compact sidebar stays mounted while closed so it can slide out. */}
 				<div

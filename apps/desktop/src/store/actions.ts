@@ -52,8 +52,10 @@ import {
 	activeHistory,
 	canGoBack,
 	canGoForward,
+	dropTabHistory,
 	normalizeStack,
 	pushHistory,
+	resetHistory,
 	rewriteHistory,
 	setHistory,
 } from "./history";
@@ -65,6 +67,7 @@ import {
 	chatCommandStore,
 	cleanFileState,
 	codeFileOpenModeStore,
+	type DocumentState,
 	emptyDoc,
 	type FileEntry,
 	type FolderEntry,
@@ -89,6 +92,15 @@ import {
 	withOpenedDoc,
 	workspaceStore,
 } from "./state";
+import {
+	activateTab,
+	addTab,
+	documentForTab,
+	removeTab,
+	resetTabs,
+	tabForPath,
+	tabsStore,
+} from "./tabs";
 import { createTitleManager } from "./titleManagement";
 import { applyWorkspaceDelta } from "./workspaceDelta";
 
@@ -741,6 +753,10 @@ export async function openWorkspace(path?: string) {
 		};
 	});
 	switcherOpenStore.set(false);
+	// Tabs belong to the workspace that opened them. Per-workspace tab sets are a
+	// later slice; for now the new workspace starts on one empty tab.
+	resetTabs();
+	resetHistory();
 	await Promise.all([refreshFileList(nextPath), loadPinnedNotes(nextPath)]);
 
 	const lastFile = workspaceStore.get().lastOpenedPaths[nextPath];
@@ -1412,6 +1428,13 @@ export async function loadPath(path: string, options?: LoadPathOptions) {
 		return;
 	}
 	if (fileKindForPath(path) !== "external") {
+		// A path is open in at most one tab, so opening one that already lives in
+		// another tab reveals it instead of duplicating it.
+		const openTab = tabForPath(path);
+		if (openTab && openTab !== tabsStore.get().activeTabId) {
+			await switchToTab(openTab);
+			return;
+		}
 		await loadInternalPath(path, options);
 		return;
 	}
@@ -1446,6 +1469,147 @@ export async function openChangelog(): Promise<boolean> {
 		viewMode: "rich",
 	}));
 	return true;
+}
+
+// ── Tabs ────────────────────────────────────────────────────────────
+//
+// tabs.ts owns the bookkeeping; the orchestration that has to touch disk
+// (saving the outgoing note, loading the incoming one) lives here.
+
+/** Blocks a second switch from racing an in-flight save + swap. */
+let isSwitchingTab = false;
+
+function isSavableDoc(doc: DocumentState): doc is DocumentState & {
+	currentPath: string;
+} {
+	return (
+		doc.currentPath !== null &&
+		!isChangelogPath(doc.currentPath) &&
+		isEditableFile(doc.currentPath) &&
+		doc.externalChange.kind !== "conflict"
+	);
+}
+
+/**
+ * Records the tab's note as the one to reopen on relaunch, mirroring what
+ * `withOpenedDoc` does for a fresh open.
+ */
+function rememberOpenedDoc(doc: DocumentState | null) {
+	const path = doc?.currentPath;
+	if (!path || isChangelogPath(path)) return;
+	appStore.set((state) => {
+		const workspacePath = state.workspace.workspacePath;
+		const workspace =
+			workspacePath && isInWorkspace(path, workspacePath)
+				? {
+						...state.workspace,
+						lastOpenedPaths: {
+							...state.workspace.lastOpenedPaths,
+							[workspacePath]: path,
+						},
+					}
+				: state.workspace;
+		return {
+			...state,
+			workspace,
+			document: { ...state.document, lastOpenedPath: path },
+		};
+	});
+}
+
+/**
+ * Shows another tab's note. The outgoing note is saved first (a conflict is
+ * stashed with its buffer instead of blocking the switch) and its whole
+ * document state is parked on its tab, so coming back restores the draft,
+ * the conflict and the view mode exactly as they were.
+ */
+export async function switchToTab(id: string) {
+	if (isSwitchingTab) return;
+	const { tabs, activeTabId } = tabsStore.get();
+	if (id === activeTabId || !tabs.some((tab) => tab.id === id)) return;
+
+	isSwitchingTab = true;
+	try {
+		const current = viewerStore.get();
+		if (isSavableDoc(current)) {
+			await savePathContent(current.currentPath, current.content);
+		}
+		// An in-flight load must not resolve over the tab we are switching to.
+		invalidateLoadPath();
+		rememberOpenedDoc(activateTab(id));
+	} finally {
+		isSwitchingTab = false;
+	}
+}
+
+/**
+ * Opens `path` in its own tab. Paths that never take over the viewer (external
+ * files, code files routed to another app) and the virtual changelog keep their
+ * existing single-document behavior.
+ */
+export async function openPathInNewTab(path: string) {
+	if (isChangelogPath(path)) {
+		await openChangelog();
+		return;
+	}
+	if (
+		fileKindForPath(path) === "external" ||
+		(isCodeFile(path) && codeFileOpenModeStore.get() === "default-app")
+	) {
+		await loadPath(path);
+		return;
+	}
+	const openTab = tabForPath(path);
+	if (openTab) {
+		await switchToTab(openTab);
+		return;
+	}
+	// An empty tab is the natural home for the next file, the way a browser
+	// reuses a blank tab rather than stranding it beside the new one.
+	if (viewerStore.get().currentPath !== null) {
+		await switchToTab(addTab());
+	}
+	// A missing file surfaces through loadPath's toast and leaves an empty tab.
+	await loadPath(path);
+}
+
+/**
+ * Closes a tab, saving its note when it holds unsaved edits. The last tab is
+ * replaced by an empty one so the app lands on the open-file/welcome state.
+ */
+export async function closeTab(id: string) {
+	const { activeTabId } = tabsStore.get();
+	const doc = documentForTab(id);
+	if (doc && isSavableDoc(doc) && doc.content !== getBaseline(doc)) {
+		// Best effort: a failed save still closes the tab in this slice.
+		await (id === activeTabId
+			? savePathContent(doc.currentPath, doc.content)
+			: saveBackgroundBuffer(doc.currentPath, doc.content));
+	}
+	const removal = removeTab(id);
+	if (!removal) return;
+	dropTabHistory(id);
+	const closedPath = doc?.currentPath;
+	if (closedPath && !tabForPath(closedPath)) titleManager.stop(closedPath);
+	if (removal.restored) rememberOpenedDoc(removal.restored);
+}
+
+/**
+ * Writes a background tab's draft. `savePathContent` only ever writes the
+ * active document, so a stashed buffer takes the plain write path while still
+ * queueing behind that file's other saves.
+ */
+function saveBackgroundBuffer(path: string, content: string) {
+	return saves.run(path, async () => {
+		try {
+			rememberSelfSave(path, content);
+			await desktopApi.writeFileText(path, content);
+			rememberSelfSave(path, content);
+			touchFile(path);
+		} catch (err) {
+			toast.error("Failed to save file", { description: handleFileError(err) });
+		}
+	});
 }
 
 async function navigateHistory(delta: -1 | 1) {

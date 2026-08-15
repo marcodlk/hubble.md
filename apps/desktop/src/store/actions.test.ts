@@ -2392,13 +2392,14 @@ describe("desktop loadPath", () => {
 		expect(canGoForward()).toBe(false);
 	});
 
-	it("keeps navigation history separate per workspace", async () => {
+	it("starts a fresh navigation history in a newly opened workspace", async () => {
 		const api = createDesktopApi();
 		api.pathExists.mockResolvedValue(true);
 		api.readFileText.mockImplementation(
 			async (path: string) => `content:${path}`,
 		);
-		const { appStore, canGoBack, loadPath } = await loadStoreActions(api);
+		const { appStore, canGoBack, loadPath, openWorkspace } =
+			await loadStoreActions(api);
 
 		appStore.set((current) => ({
 			...current,
@@ -2408,10 +2409,8 @@ describe("desktop loadPath", () => {
 		await loadPath("/workspace-a/b.md");
 		expect(canGoBack()).toBe(true);
 
-		appStore.set((current) => ({
-			...current,
-			workspace: { ...current.workspace, workspacePath: "/workspace-b" },
-		}));
+		// History follows the tab, and a workspace switch resets the tabs.
+		await openWorkspace("/workspace-b");
 
 		expect(canGoBack()).toBe(false);
 	});

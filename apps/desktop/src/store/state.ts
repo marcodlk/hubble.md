@@ -31,7 +31,7 @@ type ExternalChange =
 	| { kind: "none" }
 	| { kind: "conflict"; diskContent: string };
 
-type DocumentState = {
+export type DocumentState = {
 	currentPath: string | null;
 	lastOpenedPath: string | null;
 	content: string;
@@ -54,7 +54,7 @@ export type HistoryStack = {
 };
 
 export type HistoryState = {
-	byWorkspace: Record<string, HistoryStack>;
+	byTab: Record<string, HistoryStack>;
 	isNavigating: boolean;
 };
 
@@ -166,7 +166,7 @@ export const appStore = store<DesktopState>(initialState, {
 });
 
 export const historyStore = store<HistoryState>({
-	byWorkspace: {},
+	byTab: {},
 	isNavigating: false,
 });
 
