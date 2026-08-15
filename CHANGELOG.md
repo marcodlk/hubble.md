@@ -9,6 +9,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com).
 
 ### Added
 
+- Notes open in tabs: opening a file from the picker, Finder, or `open -a Hubble` keeps the current note in its own tab. Each tab has its own back/forward history and unsaved-changes indicator, switch with Ctrl+Tab or Cmd+1–9, close with Cmd+W, and each workspace reopens the tabs it was left on. [#240](https://github.com/bholmesdev/hubble.md/issues/240)
 - HTML Apps can open external links in the system browser with `hubble.links.open(url)`. [#263](https://github.com/bholmesdev/hubble.md/pull/263)
 
 ### Changed

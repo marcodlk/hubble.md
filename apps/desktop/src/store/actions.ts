@@ -1729,15 +1729,16 @@ export async function closeTab(id: string) {
 	const doc = documentForTab(id);
 	if (doc && isSavableDoc(doc) && isDirty(doc)) {
 		await savePathContent(doc.currentPath, doc.content);
-		// The note changed on disk behind the tab, so closing it would drop one of
-		// the two versions. Keep the tab open on its conflict instead. A failed
-		// write still closes, as before.
-		if (hasDiskConflict(doc.currentPath)) {
-			toast.error("File changed on disk", {
-				description: `${basename(doc.currentPath)} has unsaved edits that conflict with a change on disk.`,
-			});
-			return;
-		}
+	}
+	// The note changed on disk behind the tab, so closing it would drop one of
+	// the two versions. Keep the tab open on its conflict instead — whether the
+	// conflict was already known or the save's preflight just found it — until
+	// the user resolves it from the banner. A failed write still closes.
+	if (doc?.currentPath && isDirty(doc) && hasDiskConflict(doc.currentPath)) {
+		toast.error("File changed on disk", {
+			description: `${basename(doc.currentPath)} has unsaved edits that conflict with a change on disk.`,
+		});
+		return;
 	}
 	const removal = removeTab(id);
 	if (!removal) return;

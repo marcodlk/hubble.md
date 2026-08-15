@@ -470,6 +470,35 @@ describe("desktop tabs", () => {
 		expect(tabsStore.get().tabs).toHaveLength(1);
 	});
 
+	it("refuses to close a tab whose conflict was already known", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const store = await loadStore(api);
+
+		await store.openPathInNewTab("/workspace/a.md");
+		const firstTabId = store.tabsStore.get().activeTabId;
+		store.updateEditorContent("/workspace/a.md", "dirty a");
+		disk.failNextWrite();
+		await store.openPathInNewTab("/workspace/b.md");
+
+		// The watcher already marked the conflict, so the close finds it recorded
+		// rather than discovering it at preflight — it must refuse either way.
+		disk.write("/workspace/a.md", "theirs");
+		store.handleExternalFileChange("/workspace/a.md", "theirs");
+		await store.closeTab(firstTabId);
+
+		expect(disk.read("/workspace/a.md")).toBe("theirs");
+		expect(store.tabsStore.get().tabs).toHaveLength(2);
+		const buffer = store.tabsStore
+			.get()
+			.tabs.find((tab) => tab.id === firstTabId)?.buffer;
+		expect(buffer).toMatchObject({ content: "dirty a" });
+		expect(buffer?.externalChange).toEqual({
+			kind: "conflict",
+			diskContent: "theirs",
+		});
+	});
+
 	it("flushes background drafts before a workspace switch resets the tabs", async () => {
 		const api = createDesktopApi();
 		const disk = withFakeDisk(api);
