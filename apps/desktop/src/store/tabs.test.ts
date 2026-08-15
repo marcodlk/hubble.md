@@ -35,6 +35,35 @@ function createDesktopApi(): MockDesktopApi {
 }
 
 /**
+ * Backs the api with an in-memory disk so tests can change a file behind a
+ * background tab, and can make one write fail to leave a tab holding a draft
+ * that never reached disk.
+ */
+function withFakeDisk(api: MockDesktopApi) {
+	const disk = new Map<string, string>();
+	let failNextWrite = false;
+	api.readFileText.mockImplementation(
+		async (path: string) => disk.get(path) ?? `content:${path}`,
+	);
+	api.writeFileText.mockImplementation(
+		async (path: string, content: string) => {
+			if (failNextWrite) {
+				failNextWrite = false;
+				throw new Error("write failed");
+			}
+			disk.set(path, content);
+		},
+	);
+	return {
+		read: (path: string) => disk.get(path) ?? `content:${path}`,
+		write: (path: string, content: string) => disk.set(path, content),
+		failNextWrite: () => {
+			failNextWrite = true;
+		},
+	};
+}
+
+/**
  * The store modules are singletons that capture window.desktopApi at import
  * time, so every test re-imports them against a freshly stubbed environment.
  */
@@ -359,6 +388,146 @@ describe("desktop tabs", () => {
 		expect(tabsStore.get().tabs).toHaveLength(1);
 		expect(before).not.toContain(tabsStore.get().activeTabId);
 		expect(viewerStore.get().currentPath).toBeNull();
+	});
+
+	it("runs every queued switch instead of dropping rapid clicks", async () => {
+		const api = createDesktopApi();
+		const { openPathInNewTab, switchToTab, tabsStore, viewerStore } =
+			await loadStore(api);
+
+		await openPathInNewTab("/workspace/a.md");
+		const firstTabId = tabsStore.get().activeTabId;
+		await openPathInNewTab("/workspace/b.md");
+		const secondTabId = tabsStore.get().activeTabId;
+		await openPathInNewTab("/workspace/c.md");
+
+		await Promise.all([switchToTab(firstTabId), switchToTab(secondTabId)]);
+
+		expect(tabsStore.get().activeTabId).toBe(secondTabId);
+		expect(viewerStore.get().currentPath).toBe("/workspace/b.md");
+	});
+
+	it("keeps a background draft when the file changed on disk underneath it", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const {
+			closeTab,
+			openPathInNewTab,
+			tabsStore,
+			updateEditorContent,
+			viewerStore,
+		} = await loadStore(api);
+
+		await openPathInNewTab("/workspace/a.md");
+		const firstTabId = tabsStore.get().activeTabId;
+		updateEditorContent("/workspace/a.md", "dirty a");
+		// The save on the way out fails, so the tab is backgrounded still dirty.
+		disk.failNextWrite();
+		await openPathInNewTab("/workspace/b.md");
+		expect(disk.read("/workspace/a.md")).toBe("content:/workspace/a.md");
+
+		// Someone else edits the note while nothing watches the background tab.
+		disk.write("/workspace/a.md", "theirs");
+		await closeTab(firstTabId);
+
+		expect(disk.read("/workspace/a.md")).toBe("theirs");
+		expect(tabsStore.get().tabs).toHaveLength(2);
+		expect(viewerStore.get().currentPath).toBe("/workspace/b.md");
+		const buffer = tabsStore
+			.get()
+			.tabs.find((tab) => tab.id === firstTabId)?.buffer;
+		expect(buffer).toMatchObject({ content: "dirty a" });
+		expect(buffer?.externalChange).toEqual({
+			kind: "conflict",
+			diskContent: "theirs",
+		});
+	});
+
+	it("writes an unsaved background draft when the file is unchanged", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const { closeTab, openPathInNewTab, tabsStore, updateEditorContent } =
+			await loadStore(api);
+
+		await openPathInNewTab("/workspace/a.md");
+		const firstTabId = tabsStore.get().activeTabId;
+		updateEditorContent("/workspace/a.md", "dirty a");
+		disk.failNextWrite();
+		await openPathInNewTab("/workspace/b.md");
+
+		await closeTab(firstTabId);
+
+		expect(disk.read("/workspace/a.md")).toBe("dirty a");
+		expect(tabsStore.get().tabs).toHaveLength(1);
+	});
+
+	it("flushes background drafts before a workspace switch resets the tabs", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const { openPathInNewTab, openWorkspace, tabsStore, updateEditorContent } =
+			await loadStore(api);
+
+		await openPathInNewTab("/workspace/a.md");
+		updateEditorContent("/workspace/a.md", "dirty a");
+		disk.failNextWrite();
+		await openPathInNewTab("/workspace/b.md");
+
+		await openWorkspace("/other-workspace");
+
+		expect(disk.read("/workspace/a.md")).toBe("dirty a");
+		expect(tabsStore.get().tabs).toHaveLength(1);
+	});
+
+	it("refuses a workspace switch that would drop a conflicted background draft", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const {
+			openPathInNewTab,
+			openWorkspace,
+			tabsStore,
+			updateEditorContent,
+			workspaceStore,
+		} = await loadStore(api);
+
+		await openPathInNewTab("/workspace/a.md");
+		updateEditorContent("/workspace/a.md", "dirty a");
+		disk.failNextWrite();
+		await openPathInNewTab("/workspace/b.md");
+		disk.write("/workspace/a.md", "theirs");
+
+		await openWorkspace("/other-workspace");
+
+		expect(workspaceStore.get().workspacePath).not.toBe("/other-workspace");
+		expect(tabsStore.get().tabs).toHaveLength(2);
+		expect(disk.read("/workspace/a.md")).toBe("theirs");
+	});
+
+	it("skips history entries that another tab now owns", async () => {
+		const api = createDesktopApi();
+		const {
+			canGoBack,
+			goBack,
+			loadPath,
+			openPathInNewTab,
+			switchToTab,
+			tabsStore,
+			viewerStore,
+		} = await loadStore(api);
+
+		await openPathInNewTab("/workspace/a.md");
+		const firstTabId = tabsStore.get().activeTabId;
+		await loadPath("/workspace/a2.md");
+		// a.md leaves this tab's viewer but stays in its stack, then a second tab
+		// takes ownership of it.
+		await openPathInNewTab("/workspace/a.md");
+		await switchToTab(firstTabId);
+
+		await goBack();
+
+		// Back stayed inside the tab rather than jumping to the tab holding a.md.
+		expect(tabsStore.get().activeTabId).toBe(firstTabId);
+		expect(viewerStore.get().currentPath).toBe("/workspace/a2.md");
+		expect(canGoBack()).toBe(false);
 	});
 
 	it("ignores switching to the active or an unknown tab", async () => {

@@ -95,11 +95,13 @@ import {
 import {
 	activateTab,
 	addTab,
+	backgroundBuffers,
 	documentForTab,
 	removeTab,
 	resetTabs,
 	tabForPath,
 	tabsStore,
+	updateTabBuffer,
 } from "./tabs";
 import { createTitleManager } from "./titleManagement";
 import { applyWorkspaceDelta } from "./workspaceDelta";
@@ -737,6 +739,16 @@ export async function openWorkspace(path?: string) {
 		const selected = await desktopApi.openFolderPicker();
 		if (typeof selected !== "string") return;
 		nextPath = selected;
+	}
+	// The new workspace starts on one empty tab, so every stashed draft has to
+	// reach disk first. A draft that cannot be saved keeps the current
+	// workspace: switching would throw the only copy of it away.
+	const unsaved = await saveAllTabs();
+	if (unsaved) {
+		toast.error("Unsaved changes", {
+			description: `${basename(unsaved)} changed on disk. Resolve it before opening another folder.`,
+		});
+		return;
 	}
 	if (workspaceStore.get().workspacePath !== nextPath) {
 		await expireDeleteUndo();
@@ -1476,8 +1488,8 @@ export async function openChangelog(): Promise<boolean> {
 // tabs.ts owns the bookkeeping; the orchestration that has to touch disk
 // (saving the outgoing note, loading the incoming one) lives here.
 
-/** Blocks a second switch from racing an in-flight save + swap. */
-let isSwitchingTab = false;
+/** Serializes switches so a second click waits instead of being dropped. */
+let switchQueue: Promise<void> = Promise.resolve();
 
 function isSavableDoc(doc: DocumentState): doc is DocumentState & {
 	currentPath: string;
@@ -1523,23 +1535,28 @@ function rememberOpenedDoc(doc: DocumentState | null) {
  * document state is parked on its tab, so coming back restores the draft,
  * the conflict and the view mode exactly as they were.
  */
-export async function switchToTab(id: string) {
-	if (isSwitchingTab) return;
+export function switchToTab(id: string) {
+	// Rapid clicks queue up: every switch still runs, in click order, so the
+	// last one clicked is the tab left showing.
+	const run = switchQueue.then(
+		() => switchToTabNow(id),
+		() => switchToTabNow(id),
+	);
+	switchQueue = run.catch(() => {});
+	return run;
+}
+
+async function switchToTabNow(id: string) {
 	const { tabs, activeTabId } = tabsStore.get();
 	if (id === activeTabId || !tabs.some((tab) => tab.id === id)) return;
 
-	isSwitchingTab = true;
-	try {
-		const current = viewerStore.get();
-		if (isSavableDoc(current)) {
-			await savePathContent(current.currentPath, current.content);
-		}
-		// An in-flight load must not resolve over the tab we are switching to.
-		invalidateLoadPath();
-		rememberOpenedDoc(activateTab(id));
-	} finally {
-		isSwitchingTab = false;
+	const current = viewerStore.get();
+	if (isSavableDoc(current)) {
+		await savePathContent(current.currentPath, current.content);
 	}
+	// An in-flight load must not resolve over the tab we are switching to.
+	invalidateLoadPath();
+	rememberOpenedDoc(activateTab(id));
 }
 
 /**
@@ -1581,10 +1598,26 @@ export async function closeTab(id: string) {
 	const { activeTabId } = tabsStore.get();
 	const doc = documentForTab(id);
 	if (doc && isSavableDoc(doc) && doc.content !== getBaseline(doc)) {
-		// Best effort: a failed save still closes the tab in this slice.
-		await (id === activeTabId
-			? savePathContent(doc.currentPath, doc.content)
-			: saveBackgroundBuffer(doc.currentPath, doc.content));
+		if (id === activeTabId) {
+			// Best effort: a failed save still closes the tab in this slice.
+			await savePathContent(doc.currentPath, doc.content);
+		} else {
+			const result = await saveBackgroundBuffer(
+				id,
+				doc.currentPath,
+				doc.content,
+				getBaseline(doc),
+			);
+			// The note changed on disk behind the tab, so closing it would drop
+			// one of the two versions. Keep the tab open on its conflict instead.
+			// A failed write still closes, as before.
+			if (result === "conflict") {
+				toast.error("File changed on disk", {
+					description: `${basename(doc.currentPath)} has unsaved edits that conflict with a change on disk.`,
+				});
+				return;
+			}
+		}
 	}
 	const removal = removeTab(id);
 	if (!removal) return;
@@ -1594,22 +1627,98 @@ export async function closeTab(id: string) {
 	if (removal.restored) rememberOpenedDoc(removal.restored);
 }
 
+function isDirty(doc: DocumentState) {
+	return doc.content !== getBaseline(doc);
+}
+
+/**
+ * Flushes every tab's unsaved edits to disk, for callers that are about to
+ * drop the tab set. Returns the path of the first draft that could not be
+ * saved because the file changed underneath it, or `null` when everything
+ * dirty is safely on disk.
+ */
+async function saveAllTabs(): Promise<string | null> {
+	const current = viewerStore.get();
+	if (isSavableDoc(current) && isDirty(current)) {
+		await savePathContent(current.currentPath, current.content);
+	}
+	let blocked: string | null = null;
+	for (const { id, buffer } of backgroundBuffers()) {
+		if (!buffer.currentPath || !isDirty(buffer)) continue;
+		if (!isSavableDoc(buffer)) {
+			// Already conflicted: its draft is only recoverable from the tab.
+			if (isEditableFile(buffer.currentPath)) blocked ??= buffer.currentPath;
+			continue;
+		}
+		const result = await saveBackgroundBuffer(
+			id,
+			buffer.currentPath,
+			buffer.content,
+			getBaseline(buffer),
+		);
+		if (result === "conflict") blocked ??= buffer.currentPath;
+	}
+	return blocked;
+}
+
 /**
  * Writes a background tab's draft. `savePathContent` only ever writes the
- * active document, so a stashed buffer takes the plain write path while still
+ * active document, so a stashed buffer takes its own write path while still
  * queueing behind that file's other saves.
+ *
+ * Nothing watches a backgrounded note yet (slice 2), so the disk preflight
+ * `savePathContentNow` runs is the only thing standing between a stale stash
+ * and someone else's newer text. A divergence is recorded on the buffer as a
+ * conflict for the user to resolve on that tab.
  */
-function saveBackgroundBuffer(path: string, content: string) {
-	return saves.run(path, async () => {
+async function saveBackgroundBuffer(
+	tabId: string,
+	path: string,
+	content: string,
+	baseline: string,
+): Promise<"saved" | "conflict" | "error"> {
+	let outcome: "saved" | "conflict" | "error" = "saved";
+	await saves.run(path, async () => {
+		let diskContent: string | null = null;
+		try {
+			diskContent = await desktopApi.readFileText(path);
+		} catch {
+			// Unreadable during preflight: fall through to the write, the same way
+			// the active document's save does.
+		}
+		if (diskContent !== null && !isSelfSave(path, diskContent)) {
+			const action = classifyFileChange({
+				editorContent: content,
+				baseline,
+				diskContent,
+			});
+			// "reload" cannot happen: a clean buffer is never saved.
+			if (action === "conflict") {
+				const disk = diskContent;
+				updateTabBuffer(tabId, path, (buffer) =>
+					applyFileAction(buffer, disk, "conflict"),
+				);
+				outcome = "conflict";
+				return;
+			}
+			if (action === "match") return;
+		}
 		try {
 			rememberSelfSave(path, content);
 			await desktopApi.writeFileText(path, content);
 			rememberSelfSave(path, content);
 			touchFile(path);
+			updateTabBuffer(tabId, path, (buffer) =>
+				buffer.content === content
+					? { ...buffer, ...cleanFileState(content) }
+					: { ...buffer, diskContent: content },
+			);
 		} catch (err) {
+			outcome = "error";
 			toast.error("Failed to save file", { description: handleFileError(err) });
 		}
 	});
+	return outcome;
 }
 
 async function navigateHistory(delta: -1 | 1) {
@@ -1637,7 +1746,14 @@ async function navigateHistory(delta: -1 | 1) {
 		let nextIndex = working.index + (fromChangelog ? 0 : delta);
 		while (nextIndex >= 0 && nextIndex < working.entries.length) {
 			const target = working.entries[nextIndex];
-			if (await desktopApi.pathExists(target)) {
+			// Back and forward stay inside their own tab. A note another tab
+			// already owns cannot be shown here (a path lives in one tab only), so
+			// it drops out of this stack the way a deleted file does.
+			const owner = tabForPath(target);
+			const reachable =
+				(!owner || owner === tabsStore.get().activeTabId) &&
+				(await desktopApi.pathExists(target));
+			if (reachable) {
 				setHistory({ entries: working.entries, index: nextIndex });
 				await loadPath(target, {
 					history: "none",

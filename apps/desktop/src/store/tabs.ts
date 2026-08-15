@@ -71,6 +71,41 @@ export function tabForPath(path: string): string | null {
 	return null;
 }
 
+/** Every background tab's stashed document, paired with its tab id. */
+export function backgroundBuffers(): { id: string; buffer: DocumentState }[] {
+	const state = tabsStore.get();
+	return state.tabs.flatMap((tab) =>
+		tab.id === state.activeTabId || !tab.buffer
+			? []
+			: [{ id: tab.id, buffer: tab.buffer }],
+	);
+}
+
+/**
+ * Rewrites a background tab's stash, e.g. to record a disk conflict found
+ * while saving it. Ignored once the tab is gone, active, or showing another
+ * note, so a slow save can never resurrect stale state.
+ */
+export function updateTabBuffer(
+	id: string,
+	path: string,
+	update: (buffer: DocumentState) => DocumentState,
+) {
+	tabsStore.set((state) => {
+		if (state.activeTabId === id) return state;
+		const target = state.tabs.find((tab) => tab.id === id);
+		if (!target?.buffer || target.buffer.currentPath !== path) return state;
+		return {
+			...state,
+			tabs: state.tabs.map((tab) =>
+				tab.id === id && tab.buffer
+					? { ...tab, buffer: update(tab.buffer) }
+					: tab,
+			),
+		};
+	});
+}
+
 /** Appends an empty tab without activating it. Returns its id. */
 export function addTab(): string {
 	const tab = freshTab();
