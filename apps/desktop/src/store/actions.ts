@@ -1566,17 +1566,26 @@ function rememberOpenedDoc(doc: DocumentState | null) {
  * the conflict and the view mode exactly as they were.
  */
 export function switchToTab(id: string) {
-	// Rapid clicks queue up: every switch still runs, in click order, so the
-	// last one clicked is the tab left showing.
+	return queueSwitch(() => id);
+}
+
+/**
+ * Runs switches one at a time, in the order they were asked for. The tab is
+ * named by a callback rather than an id so a relative move picks its target
+ * when its turn comes: a burst of Ctrl+Tab presses steps once per press
+ * instead of resolving every press against the tab that is still on screen.
+ */
+function queueSwitch(target: () => string | null) {
 	const run = switchQueue.then(
-		() => switchToTabNow(id),
-		() => switchToTabNow(id),
+		() => switchToTabNow(target()),
+		() => switchToTabNow(target()),
 	);
 	switchQueue = run.catch(() => {});
 	return run;
 }
 
-async function switchToTabNow(id: string) {
+async function switchToTabNow(id: string | null) {
+	if (!id) return;
 	const { tabs, activeTabId } = tabsStore.get();
 	if (id === activeTabId || !tabs.some((tab) => tab.id === id)) return;
 
@@ -1621,15 +1630,13 @@ export async function openPathInNewTab(path: string) {
 }
 
 /** Shows the tab `offset` places along, wrapping at both ends. */
-export async function switchToRelativeTab(offset: number) {
-	const id = tabIdAtOffset(offset);
-	if (id) await switchToTab(id);
+export function switchToRelativeTab(offset: number) {
+	return queueSwitch(() => tabIdAtOffset(offset));
 }
 
 /** Shows the tab a number shortcut names; slot 9 is the last tab. */
-export async function switchToTabSlot(slot: number) {
-	const id = tabIdForSlot(slot);
-	if (id) await switchToTab(id);
+export function switchToTabSlot(slot: number) {
+	return queueSwitch(() => tabIdForSlot(slot));
 }
 
 /** Closes the tab on screen, for the menu and the command palette. */

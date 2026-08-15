@@ -26,13 +26,23 @@ function TabIndicatorDot({ indicator }: { indicator: TabIndicator }) {
 			role="img"
 			aria-label={description}
 			title={description}
-			className="pointer-events-none absolute inset-0 flex items-center justify-center group-focus-within:opacity-0 group-hover:opacity-0"
+			className="pointer-events-none absolute inset-0 flex items-center justify-center group-hover:opacity-0 group-focus-within/close:opacity-0"
 		>
 			<span
 				className={`size-2 rounded-full ${conflict ? "bg-destructive" : "bg-current"}`}
 			/>
 		</span>
 	);
+}
+
+/**
+ * Keeps the active tab on screen. A keyboard switch can land on a tab the row
+ * has scrolled past, which would otherwise leave the bar showing no selection
+ * at all. React runs this when a tab becomes the active one, not on every
+ * render, so the row does not fight a scroll the user is making by hand.
+ */
+function revealActiveTab(element: HTMLDivElement | null) {
+	element?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 /**
@@ -67,16 +77,19 @@ export function TabBar() {
 				const isActive = tab.id === activeTabId;
 				const path = paths[index];
 				const label = tabLabel(path);
-				const parent =
+				// A note at the filesystem root has no folder name to fall back on,
+				// so it keeps the bare file name.
+				const folder =
 					path && !isChangelogPath(path) && duplicateNames.has(label)
-						? dirname(path)
-						: null;
+						? basename(dirname(path) ?? "")
+						: "";
 				const indicator = isActive
 					? activeIndicator
 					: documentIndicator(tab.buffer);
 				return (
 					<div
 						key={tab.id}
+						ref={isActive ? revealActiveTab : null}
 						role="tab"
 						aria-selected={isActive}
 						tabIndex={isActive ? 0 : -1}
@@ -105,15 +118,13 @@ export function TabBar() {
 					>
 						<span className="min-w-0 flex-1 truncate">
 							{label}
-							{parent ? (
-								<span className="text-muted-foreground/70">
-									{" "}
-									· {basename(parent)}
-								</span>
+							{folder ? (
+								<span className="text-muted-foreground/70"> · {folder}</span>
 							) : null}
 						</span>
-						{/* Dot and close button share one slot: the dot gives way on hover. */}
-						<span className="relative flex size-4 shrink-0 items-center justify-center">
+						{/* Dot and close button share one slot: the dot gives way on
+						    hover, and to the close button taking focus. */}
+						<span className="group/close relative flex size-4 shrink-0 items-center justify-center">
 							<TabIndicatorDot indicator={indicator} />
 							<button
 								type="button"

@@ -217,14 +217,10 @@ function defineCommands(
 		fromRegistry("app.previous-tab", "Navigate", ["tab", "switch"], () =>
 			switchToRelativeTab(-1),
 		),
-		fromRegistry(
-			"app.close-tab",
-			"Navigate",
-			["tab", "close"],
-			closeActiveTab,
-			// The accelerator lives on the File menu, which owns Cmd+W.
-			{ globalShortcut: false },
-		),
+		// The accelerator lives on the File menu, which owns Cmd+W, so the
+		// palette hands the key over the way it does for every other shortcut
+		// handled outside it.
+		fromRegistry("app.close-tab", "Navigate", ["tab", "close"], closeActiveTab),
 		fromRegistry(
 			"app.open-recent",
 			"Navigate",

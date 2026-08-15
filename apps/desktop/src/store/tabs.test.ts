@@ -883,6 +883,21 @@ describe("tab navigation shortcuts", () => {
 		expect(store.viewerStore.get().currentPath).toBe("/workspace/b.md");
 	});
 
+	it("steps once per press when switches are asked for in a burst", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		await threeTabs(store);
+
+		// Two presses land before the first switch finishes. Each one has to pick
+		// its target when its turn comes, or both step off c.md onto a.md.
+		await Promise.all([
+			store.switchToRelativeTab(1),
+			store.switchToRelativeTab(1),
+		]);
+
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/b.md");
+	});
+
 	it("has nowhere to cycle to with a single tab", async () => {
 		const api = createDesktopApi();
 		const store = await loadStore(api);
