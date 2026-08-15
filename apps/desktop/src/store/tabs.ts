@@ -429,9 +429,11 @@ function sameRecord(a: OpenTabsRecord | undefined, b: OpenTabsRecord) {
 let recordingSuppressed = true;
 
 /**
- * Writes the current tab set into the active workspace's record. Loose files
- * opened without a workspace are not recorded: `lastOpenedPath` already brings
- * the single note back.
+ * Writes the current tab set into the active workspace's record, including an
+ * empty one: closing the last note leaves the workspace on an empty tab, and
+ * relaunching onto the note that was just closed would undo the close. Loose
+ * files opened without a workspace are not recorded: `lastOpenedPath` already
+ * brings the single note back.
  */
 export function recordOpenTabs() {
 	if (recordingSuppressed) return;
@@ -441,13 +443,6 @@ export function recordOpenTabs() {
 	workspaceStore.set((state) => {
 		if (state.workspacePath !== workspacePath) return state;
 		const existing = state.openTabsByWorkspace[workspacePath];
-		if (record.paths.length === 0) {
-			if (!existing) return state;
-			// No open notes is not a tab set worth restoring: forget it so the
-			// workspace falls back to its last opened note.
-			const { [workspacePath]: _dropped, ...rest } = state.openTabsByWorkspace;
-			return { ...state, openTabsByWorkspace: rest };
-		}
 		if (sameRecord(existing, record)) return state;
 		return {
 			...state,

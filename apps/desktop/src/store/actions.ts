@@ -829,8 +829,10 @@ export async function openWorkspace(path?: string) {
 /**
  * Reopens the notes a workspace was last left on, one tab each, with the tab
  * that was on screen active again. Notes that no longer exist are dropped in
- * silence, the way a missing `lastOpenedPath` is. Returns whether any tab was
- * restored; `false` leaves the caller on its single-note fallback.
+ * silence, the way a missing `lastOpenedPath` is. Returns whether the workspace
+ * had a session of its own; `false` leaves the caller on its single-note
+ * fallback. A workspace last left with nothing open comes back with nothing
+ * open, rather than reopening the note the user closed last.
  *
  * Only the paths were persisted, so every note comes back clean, in the default
  * view mode, with a history stack holding just itself.
@@ -839,21 +841,29 @@ export async function restoreWorkspaceTabs(
 	workspacePath: string,
 ): Promise<boolean> {
 	const record = workspaceStore.get().openTabsByWorkspace[workspacePath];
-	if (!record || record.paths.length === 0) return false;
+	if (!record) return false;
 	const activePath =
 		record.paths[
 			Math.min(Math.max(record.activeIndex, 0), record.paths.length - 1)
 		];
 
 	const documents: DocumentState[] = [];
+	const opened: string[] = [];
 	for (const path of record.paths) {
 		const kind = fileKindForPath(path);
 		// External files never take over the viewer, so they never held a tab.
 		if (kind === "external") continue;
+		// A path lives in at most one tab, so a duplicate in the record (a hand
+		// edited store, an older build) must not become a second tab on it.
+		if (opened.some((openPath) => pathEquals(openPath, path))) continue;
 		try {
+			// Images and PDFs are shown from disk rather than read, and a code file
+			// opens in its tab even when the "open in default app" preference is on:
+			// restoring a session must never launch another app.
 			if (kind === "viewer" && !(await desktopApi.pathExists(path))) continue;
 			const content =
 				kind === "viewer" ? "" : await desktopApi.readFileText(path);
+			opened.push(path);
 			documents.push({
 				...emptyDoc(path),
 				currentPath: path,
@@ -863,7 +873,15 @@ export async function restoreWorkspaceTabs(
 			// Deleted or unreadable since the last session: drop it silently.
 		}
 	}
-	if (documents.length === 0) return false;
+	if (documents.length === 0) {
+		// The workspace's session was empty, or every note in it is gone: either
+		// way it is left on one empty tab rather than on a note it did not record.
+		resetTabs();
+		resetHistory();
+		clearViewer();
+		beginOpenTabsRecording();
+		return true;
+	}
 
 	const activeIndex = Math.max(
 		documents.findIndex((document) => document.currentPath === activePath),

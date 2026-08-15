@@ -113,11 +113,14 @@ function hydrateOpenTabs(value: unknown): Record<string, OpenTabsRecord> {
 		const openPaths = paths.filter(
 			(path): path is string => typeof path === "string" && path.length > 0,
 		);
-		if (openPaths.length === 0) continue;
 		const index = Number.isInteger(activeIndex) ? (activeIndex as number) : 0;
+		// An empty set is kept: it says the workspace was left with nothing open,
+		// which is a session to restore rather than a record to ignore.
 		records[workspacePath] = {
 			paths: openPaths,
-			activeIndex: Math.min(Math.max(index, 0), openPaths.length - 1),
+			activeIndex: openPaths.length
+				? Math.min(Math.max(index, 0), openPaths.length - 1)
+				: 0,
 		};
 	}
 	return records;

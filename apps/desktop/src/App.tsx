@@ -702,8 +702,13 @@ function App() {
 			}
 		};
 		// Whatever startup lands on is the session from here on, and every later
-		// tab change is recorded against the workspace it belongs to.
-		void init().finally(beginOpenTabsRecording);
+		// tab change is recorded against the workspace it belongs to. An init run
+		// that was abandoned (React's development double-mount) must stay quiet:
+		// the tabs it leaves behind are the app booting, and recording them would
+		// erase the very record the surviving run restores from.
+		void init().finally(() => {
+			if (active) beginOpenTabsRecording();
+		});
 		return () => {
 			active = false;
 		};

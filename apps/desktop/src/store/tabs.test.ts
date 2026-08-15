@@ -1062,7 +1062,7 @@ describe("per-workspace tab sets", () => {
 		});
 	});
 
-	it("drops malformed tab sets on hydration", async () => {
+	it("drops malformed tab sets on hydration but keeps an empty one", async () => {
 		const { getInitialState } = await loadPersistence({
 			workspace: {
 				openTabsByWorkspace: {
@@ -1077,6 +1077,7 @@ describe("per-workspace tab sets", () => {
 
 		expect(getInitialState().workspace.openTabsByWorkspace).toEqual({
 			"/ok": { paths: ["/ok/a.md"], activeIndex: 0 },
+			"/empty": { paths: [], activeIndex: 0 },
 			"/index": { paths: ["/index/a.md"], activeIndex: 0 },
 		});
 
@@ -1280,6 +1281,101 @@ describe("per-workspace tab sets", () => {
 		expect(await store.restoreWorkspaceTabs("/workspace")).toBe(false);
 		expect(store.tabsStore.get().tabs).toHaveLength(1);
 		expect(store.viewerStore.get().currentPath).toBeNull();
+	});
+
+	it("keeps a workspace left with nothing open empty", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		await openTabs(store, "/workspace", ["/workspace/a.md"]);
+
+		// Closing the only tab lands on an empty one, and that is the session.
+		await store.closeTab(store.tabsStore.get().activeTabId);
+		await settle();
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: [],
+			activeIndex: 0,
+		});
+
+		// A relaunch onto that record stays empty instead of reopening the note
+		// that was just closed.
+		const relaunched = await loadStore(api, {
+			workspace: {
+				workspacePath: "/workspace",
+				lastOpenedPaths: { "/workspace": "/workspace/a.md" },
+				openTabsByWorkspace: { "/workspace": { paths: [], activeIndex: 0 } },
+			},
+		});
+		expect(await relaunched.restoreWorkspaceTabs("/workspace")).toBe(true);
+		expect(relaunched.tabsStore.get().tabs).toHaveLength(1);
+		expect(relaunched.viewerStore.get().currentPath).toBeNull();
+	});
+
+	it("reopens an image tab without reading it, and a code file in its tab", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api, {
+			workspace: {
+				workspacePath: "/workspace",
+				openTabsByWorkspace: {
+					"/workspace": {
+						paths: [
+							"/workspace/shot.png",
+							"/workspace/main.ts",
+							"/workspace/notes.md",
+						],
+						activeIndex: 0,
+					},
+				},
+			},
+			settings: { codeFileOpenMode: "default-app" },
+		});
+
+		expect(await store.restoreWorkspaceTabs("/workspace")).toBe(true);
+
+		const { tabs } = store.tabsStore.get();
+		expect(tabs).toHaveLength(3);
+		expect(store.viewerStore.get()).toMatchObject({
+			currentPath: "/workspace/shot.png",
+			content: "",
+			diskContent: "",
+			status: "ready",
+		});
+		expect(api.readFileText).not.toHaveBeenCalledWith("/workspace/shot.png");
+		expect(api.pathExists).toHaveBeenCalledWith("/workspace/shot.png");
+		// The "open in default app" preference must not launch anything at
+		// startup: the code file comes back in its own tab.
+		expect(api.openPathInDefaultApp).not.toHaveBeenCalled();
+		expect(tabs[1].buffer).toMatchObject({
+			currentPath: "/workspace/main.ts",
+			content: "content:/workspace/main.ts",
+		});
+	});
+
+	it("drops external paths and duplicates from a stale record", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api, {
+			workspace: {
+				workspacePath: "/workspace",
+				openTabsByWorkspace: {
+					"/workspace": {
+						paths: [
+							"/workspace/a.md",
+							"/workspace/archive.zip",
+							"/workspace/A.md",
+							"/workspace/b.md",
+						],
+						activeIndex: 3,
+					},
+				},
+			},
+		});
+
+		expect(await store.restoreWorkspaceTabs("/workspace")).toBe(true);
+
+		const { tabs, activeTabId } = store.tabsStore.get();
+		expect(tabs).toHaveLength(2);
+		expect(tabs[1].id).toBe(activeTabId);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/b.md");
+		expect(api.openPathFromLink).not.toHaveBeenCalled();
 	});
 
 	it("restores each workspace's own tabs when switching between them", async () => {
