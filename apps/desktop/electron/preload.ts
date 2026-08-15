@@ -156,6 +156,7 @@ const desktopApi = {
 		subscribe("desktop:workspace-changed", callback),
 	onMenuToggleTerminal: (callback) =>
 		subscribe("desktop:menu-toggle-terminal", callback),
+	onMenuCloseTab: (callback) => subscribe("desktop:menu-close-tab", callback),
 	onMenuGoBack: (callback) => subscribe("desktop:menu-go-back", callback),
 	onMenuGoForward: (callback) => subscribe("desktop:menu-go-forward", callback),
 	onMenuToggleSourceMode: (callback) =>

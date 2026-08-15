@@ -6,6 +6,7 @@ export type CommandContext = {
 	isSourceMode?: boolean;
 	canGoBack?: boolean;
 	canGoForward?: boolean;
+	hasMultipleTabs?: boolean;
 };
 
 export type CommandDefinition = {
@@ -22,6 +23,8 @@ const hasEditableFile = (context: CommandContext) =>
 const hasSourceViewOpen = (context: CommandContext) =>
 	context.hasSourceViewOpen === true;
 const hasWorkspace = (context: CommandContext) => context.hasWorkspace === true;
+const hasMultipleTabs = (context: CommandContext) =>
+	context.hasMultipleTabs === true;
 
 // Context-sensitive structural keys (Enter, Tab, Mod-a, Escape, and
 // ProseMirror handleKeyDown plugins), OS zoom conventions, and Electron roles
@@ -66,6 +69,24 @@ export const commandRegistry = {
 		defaultBinding: "CmdOrCtrl+]",
 		label: "Go Forward",
 		isEnabled: (context) => context.canGoForward === true,
+	},
+	// Tab switching follows the browser convention of Ctrl+Tab on every
+	// platform, so it stays reachable while Cmd+[ and Cmd+] move through a
+	// tab's own history.
+	"app.next-tab": {
+		defaultBinding: "Ctrl+Tab",
+		label: "Next Tab",
+		isEnabled: hasMultipleTabs,
+	},
+	"app.previous-tab": {
+		defaultBinding: "Ctrl+Shift+Tab",
+		label: "Previous Tab",
+		isEnabled: hasMultipleTabs,
+	},
+	"app.close-tab": {
+		defaultBinding: "CmdOrCtrl+W",
+		label: "Close Tab",
+		isEnabled: hasMultipleTabs,
 	},
 	"app.toggle-terminal": {
 		defaultBinding: "CmdOrCtrl+J",

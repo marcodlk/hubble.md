@@ -1,6 +1,12 @@
 import { store } from "@simplestack/store";
-import { pathEquals, replacePathPrefix } from "../lib/filePath";
-import { type DocumentState, emptyDoc, viewerStore } from "./state";
+import { isChangelogPath } from "../lib/changelogNote";
+import { isEditableFile, pathEquals, replacePathPrefix } from "../lib/filePath";
+import {
+	type DocumentState,
+	emptyDoc,
+	getBaseline,
+	viewerStore,
+} from "./state";
 
 /**
  * Open notes as tabs, one visible at a time.
@@ -233,6 +239,54 @@ export function activateTab(id: string): DocumentState | null {
 	});
 	viewerStore.set(restored);
 	return restored;
+}
+
+/** What a tab advertises about its document beside the file name. */
+export type TabIndicator = "none" | "dirty" | "conflict";
+
+/**
+ * The badge a tab shows for its document. A conflict outranks a dirty draft:
+ * the note changed on disk *and* in the editor, and the conflict is the state
+ * the user has to resolve.
+ */
+export function documentIndicator(
+	document: DocumentState | null | undefined,
+): TabIndicator {
+	if (!document) return "none";
+	if (document.externalChange.kind === "conflict") return "conflict";
+	const path = document.currentPath;
+	// Read-only notes (the changelog, images, PDFs) have no draft to lose.
+	if (!path || isChangelogPath(path) || !isEditableFile(path)) return "none";
+	return document.content === getBaseline(document) ? "none" : "dirty";
+}
+
+/**
+ * The tab `offset` places from the active one, wrapping at both ends. Returns
+ * `null` when there is nothing to move to.
+ */
+export function tabIdAtOffset(
+	offset: number,
+	state = tabsStore.get(),
+): string | null {
+	const { tabs, activeTabId } = state;
+	if (tabs.length < 2) return null;
+	const index = tabs.findIndex((tab) => tab.id === activeTabId);
+	if (index === -1) return null;
+	const next = (index + (offset % tabs.length) + tabs.length) % tabs.length;
+	return tabs[next].id;
+}
+
+/**
+ * The tab a number shortcut selects. Slots are 1-based, and slot 9 means "the
+ * last tab" however many are open, the way browsers treat Cmd+9.
+ */
+export function tabIdForSlot(
+	slot: number,
+	state = tabsStore.get(),
+): string | null {
+	const { tabs } = state;
+	if (slot === 9) return tabs[tabs.length - 1]?.id ?? null;
+	return tabs[slot - 1]?.id ?? null;
 }
 
 export type TabRemoval = {

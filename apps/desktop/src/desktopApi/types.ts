@@ -101,6 +101,8 @@ export type MenuState = {
 	isSourceMode: boolean;
 	canGoBack: boolean;
 	canGoForward: boolean;
+	/** More than one tab is open, so Cmd+W closes a tab, not the window. */
+	canCloseTab: boolean;
 };
 
 export type DesktopUpdateStatus =
@@ -237,6 +239,7 @@ export type DesktopApi = {
 		callback: (event: WorkspaceWatchEvent) => void,
 	): Unsubscribe;
 	onMenuToggleTerminal(callback: () => void): Unsubscribe;
+	onMenuCloseTab(callback: () => void): Unsubscribe;
 	onMenuGoBack(callback: () => void): Unsubscribe;
 	onMenuGoForward(callback: () => void): Unsubscribe;
 	onMenuToggleSourceMode(callback: () => void): Unsubscribe;

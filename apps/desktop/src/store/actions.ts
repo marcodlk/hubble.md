@@ -104,6 +104,8 @@ import {
 	resetTabs,
 	rewriteTabBufferPaths,
 	tabForPath,
+	tabIdAtOffset,
+	tabIdForSlot,
 	tabsStore,
 	updateDocumentForPath,
 } from "./tabs";
@@ -1616,6 +1618,23 @@ export async function openPathInNewTab(path: string) {
 	}
 	// A missing file surfaces through loadPath's toast and leaves an empty tab.
 	await loadPath(path);
+}
+
+/** Shows the tab `offset` places along, wrapping at both ends. */
+export async function switchToRelativeTab(offset: number) {
+	const id = tabIdAtOffset(offset);
+	if (id) await switchToTab(id);
+}
+
+/** Shows the tab a number shortcut names; slot 9 is the last tab. */
+export async function switchToTabSlot(slot: number) {
+	const id = tabIdForSlot(slot);
+	if (id) await switchToTab(id);
+}
+
+/** Closes the tab on screen, for the menu and the command palette. */
+export async function closeActiveTab() {
+	await closeTab(tabsStore.get().activeTabId);
 }
 
 /**

@@ -162,6 +162,7 @@ let menuState: MenuState = {
 	isSourceMode: false,
 	canGoBack: false,
 	canGoForward: false,
+	canCloseTab: false,
 };
 let updateState: DesktopUpdateState = {
 	isSupported: supportsAutoUpdates,
@@ -922,7 +923,27 @@ function buildMenu() {
 					click: () => sendToRenderer("desktop:menu-sync-workspace"),
 				},
 				{ type: "separator" },
-				{ role: "close" },
+				// With tabs open, Cmd+W closes the tab in front and the window moves
+				// to Cmd+Shift+W, as in a browser. The last tab hands Cmd+W back.
+				...(menuState.canCloseTab
+					? ([
+							{
+								// Shown only while a tab can be closed, so it needs no
+								// enablement of its own.
+								id: "app.close-tab",
+								label: getCommand("app.close-tab").label,
+								accelerator: getCommand("app.close-tab").defaultBinding,
+								click: () => sendToRenderer("desktop:menu-close-tab"),
+							},
+							{
+								role: "close",
+								label: "Close Window",
+								accelerator: "CmdOrCtrl+Shift+W",
+							},
+						] satisfies Electron.MenuItemConstructorOptions[])
+					: ([
+							{ role: "close" },
+						] satisfies Electron.MenuItemConstructorOptions[])),
 			],
 		},
 		{
@@ -1952,6 +1973,7 @@ function registerIpc() {
 			isSourceMode: state.isSourceMode === true,
 			canGoBack: state.canGoBack === true,
 			canGoForward: state.canGoForward === true,
+			canCloseTab: state.canCloseTab === true,
 		};
 		buildMenu();
 	});

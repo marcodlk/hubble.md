@@ -63,6 +63,7 @@ import { isDefaultLanguage, languageName } from "./lib/spellcheckLanguages";
 import { resolveWikiPath } from "./lib/wikiPath";
 import { SIDEBAR_NAV_SELECTOR } from "./selectors";
 import {
+	closeActiveTab,
 	createWorkspaceWithSidebar,
 	editorDocumentId,
 	forceKeepLocalEdits,
@@ -89,6 +90,8 @@ import {
 	setTelemetryConsent,
 	setViewerMode,
 	setWorkspaceSwitcherOpen,
+	switchToRelativeTab,
+	switchToTabSlot,
 	toggleTerminal,
 	undoDelete,
 	updateEditorContent,
@@ -112,7 +115,7 @@ import {
 	workspacePathStore,
 	workspaceStore,
 } from "./store/state";
-import { isPathOpenInAnyTab } from "./store/tabs";
+import { isPathOpenInAnyTab, tabsStore } from "./store/tabs";
 import { isDarkTheme, subscribeTheme } from "./theme";
 
 // Forces editor refresh when underlying TipTap extensions change
@@ -207,6 +210,12 @@ function App() {
 	const terminalPosition = useStoreValue(terminalPositionStore);
 	const shortcutBindings = useStoreValue(shortcutBindingsStore);
 	const hasWorkspace = workspacePath !== null;
+	// A boolean selector, so opening a second tab rebuilds the menu but every
+	// other tab change does not.
+	const hasMultipleTabs = useStoreValue(
+		tabsStore,
+		(tabs) => tabs.tabs.length > 1,
+	);
 	const { canGoBack: menuCanGoBack, canGoForward: menuCanGoForward } =
 		useHistoryNav();
 	const [scrollContainerEl, setScrollContainerEl] =
@@ -407,8 +416,10 @@ function App() {
 			isSourceMode: state.viewMode === "source",
 			canGoBack: menuCanGoBack,
 			canGoForward: menuCanGoForward,
+			canCloseTab: hasMultipleTabs,
 		});
 	}, [
+		hasMultipleTabs,
 		hasWorkspace,
 		menuCanGoBack,
 		menuCanGoForward,
@@ -435,6 +446,18 @@ function App() {
 				window.dispatchEvent(new CustomEvent(OPEN_COMMAND_PALETTE_EVENT));
 				return;
 			}
+			const tabCount = tabsStore.get().tabs.length;
+			// Number shortcuts pick a tab by position rather than naming an action,
+			// so they stay out of the command registry instead of filling the
+			// palette with nine near-identical entries.
+			if (tabCount > 1) {
+				for (let slot = 1; slot <= 9; slot += 1) {
+					if (!keymatch(event, `CmdOrCtrl+${slot}`)) continue;
+					event.preventDefault();
+					await switchToTabSlot(slot);
+					return;
+				}
+			}
 			const currentPath = focusedSidebarPath ?? viewerStore.get().currentPath;
 			// Chat targets the note open in the viewer, not the sidebar focus.
 			const viewerPath = viewerStore.get().currentPath;
@@ -448,12 +471,15 @@ function App() {
 				hasWorkspace: Boolean(workspaceStore.get().workspacePath),
 				canGoBack: canGoBack(),
 				canGoForward: canGoForward(),
+				hasMultipleTabs: tabCount > 1,
 			};
 			const handlers: Partial<
 				Record<AppCommandId, () => void | Promise<void>>
 			> = {
 				"app.go-back": goBack,
 				"app.go-forward": goForward,
+				"app.next-tab": () => switchToRelativeTab(1),
+				"app.previous-tab": () => switchToRelativeTab(-1),
 				"app.new-file": () => createMarkdownFile(focusedCreationFolder),
 				"app.settings": () => setSettingsOpen(true),
 				"app.open-recent": () => setWorkspaceSwitcherOpen(true),
@@ -540,6 +566,7 @@ function App() {
 			desktopApi.onMenuGoToFile(() => changeSearchOpen(true)),
 			desktopApi.onMenuSyncWorkspace(() => void refreshFiles()),
 			desktopApi.onMenuToggleTerminal(() => toggleTerminal()),
+			desktopApi.onMenuCloseTab(() => void closeActiveTab()),
 			desktopApi.onMenuGoBack(() => void goBack()),
 			desktopApi.onMenuGoForward(() => void goForward()),
 			desktopApi.onMenuToggleSourceMode(() => {
@@ -696,7 +723,6 @@ function App() {
 						telemetryConsent === "unset")
 				}
 			/>
-			<TabBar />
 			<div className="relative flex min-h-0 flex-1 overflow-hidden">
 				{/* Compact sidebar stays mounted while closed so it can slide out. */}
 				<div
@@ -757,45 +783,51 @@ function App() {
 					aria-live="polite"
 					onFocusCapture={closeSidebarOverlay}
 				>
-					<div className="flex-1 min-h-0 min-w-0 relative">
-						{state.status === "loading" && <p>Loading…</p>}
-						{state.status === "error" && (
-							<p>{state.error ?? "Failed to open file."}</p>
-						)}
-						{state.status !== "loading" &&
-							state.status !== "error" &&
-							!state.currentPath && (
-								<div className="flex h-full items-center justify-center p-6">
-									{hasWorkspace ? (
-										<Button onClick={() => void openFilePicker()}>
-											Open file
-										</Button>
-									) : (
-										<WelcomeScreen
-											onCreateFolder={() => void createWorkspaceWithSidebar()}
-											onOpenFolder={() => void openWorkspaceWithSidebar()}
+					{/* The tab bar belongs to the editor pane, not the window: it starts
+					    where the sidebar ends and stays above the terminal wherever the
+					    terminal is docked. */}
+					<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+						<TabBar />
+						<div className="flex-1 min-h-0 min-w-0 relative">
+							{state.status === "loading" && <p>Loading…</p>}
+							{state.status === "error" && (
+								<p>{state.error ?? "Failed to open file."}</p>
+							)}
+							{state.status !== "loading" &&
+								state.status !== "error" &&
+								!state.currentPath && (
+									<div className="flex h-full items-center justify-center p-6">
+										{hasWorkspace ? (
+											<Button onClick={() => void openFilePicker()}>
+												Open file
+											</Button>
+										) : (
+											<WelcomeScreen
+												onCreateFolder={() => void createWorkspaceWithSidebar()}
+												onOpenFolder={() => void openWorkspaceWithSidebar()}
+											/>
+										)}
+									</div>
+								)}
+							{state.status === "ready" && state.currentPath && (
+								<div className="flex h-full min-h-0 flex-col">
+									{state.externalChange.kind === "conflict" && (
+										<ExternalChangeBanner
+											onKeepMyEdits={() => void forceKeepLocalEdits()}
+											onReloadFromDisk={reloadFromDiskConflict}
 										/>
 									)}
+									<DocumentViewer
+										path={state.currentPath}
+										content={state.content}
+										copyAsMarkdownRequest={copyAsMarkdownRequest}
+										viewMode={state.viewMode}
+										spellcheckStatus={spellcheckStatus}
+										onScrollContainerChange={setScrollContainerEl}
+									/>
 								</div>
 							)}
-						{state.status === "ready" && state.currentPath && (
-							<div className="flex h-full min-h-0 flex-col">
-								{state.externalChange.kind === "conflict" && (
-									<ExternalChangeBanner
-										onKeepMyEdits={() => void forceKeepLocalEdits()}
-										onReloadFromDisk={reloadFromDiskConflict}
-									/>
-								)}
-								<DocumentViewer
-									path={state.currentPath}
-									content={state.content}
-									copyAsMarkdownRequest={copyAsMarkdownRequest}
-									viewMode={state.viewMode}
-									spellcheckStatus={spellcheckStatus}
-									onScrollContainerChange={setScrollContainerEl}
-								/>
-							</div>
-						)}
+						</div>
 					</div>
 					<TerminalPanel />
 				</section>

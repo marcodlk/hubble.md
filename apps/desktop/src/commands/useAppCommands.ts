@@ -22,6 +22,7 @@ import {
 	supportsSourceToggle,
 } from "../lib/filePath";
 import {
+	closeActiveTab,
 	createFolderInFolder,
 	deleteMarkdownFile,
 	goBack,
@@ -33,11 +34,13 @@ import {
 	setThemePreference,
 	setViewerMode,
 	setWorkspaceSwitcherOpen,
+	switchToRelativeTab,
 	togglePinnedNote,
 	toggleSidebar,
 	toggleTerminal,
 } from "../store/actions";
 import { canGoBack, canGoForward } from "../store/history";
+import { tabsStore } from "../store/tabs";
 
 const CONTRIBUTING_URL =
 	"https://github.com/bholmesdev/hubble.md/blob/main/CONTRIBUTING.md";
@@ -70,6 +73,7 @@ function toRegistryContext(context: AppCommandContext): RegistryContext {
 		isSourceMode: context.isSourceMode,
 		canGoBack: canGoBack(),
 		canGoForward: canGoForward(),
+		hasMultipleTabs: tabsStore.get().tabs.length > 1,
 	};
 }
 
@@ -207,6 +211,20 @@ function defineCommands(
 		// Navigate
 		fromRegistry("app.go-back", "Navigate", ["history", "previous"], goBack),
 		fromRegistry("app.go-forward", "Navigate", ["history", "next"], goForward),
+		fromRegistry("app.next-tab", "Navigate", ["tab", "switch"], () =>
+			switchToRelativeTab(1),
+		),
+		fromRegistry("app.previous-tab", "Navigate", ["tab", "switch"], () =>
+			switchToRelativeTab(-1),
+		),
+		fromRegistry(
+			"app.close-tab",
+			"Navigate",
+			["tab", "close"],
+			closeActiveTab,
+			// The accelerator lives on the File menu, which owns Cmd+W.
+			{ globalShortcut: false },
+		),
 		fromRegistry(
 			"app.open-recent",
 			"Navigate",

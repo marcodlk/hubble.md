@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CHANGELOG_PATH } from "../lib/changelogNote";
 
 type MockDesktopApi = {
 	readFileText: ReturnType<typeof vi.fn>;
@@ -853,5 +854,124 @@ describe("tab-aware title generation", () => {
 			renamedMarkdown,
 		);
 		expect(viewerStore.get().currentPath).toBe("/workspace/other.md");
+	});
+});
+
+describe("tab navigation shortcuts", () => {
+	beforeEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	/** Leaves three tabs open, a.md first and c.md active. */
+	async function threeTabs(store: Awaited<ReturnType<typeof loadStore>>) {
+		await store.openPathInNewTab("/workspace/a.md");
+		await store.openPathInNewTab("/workspace/b.md");
+		await store.openPathInNewTab("/workspace/c.md");
+	}
+
+	it("cycles forwards and backwards through the tab order", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		await threeTabs(store);
+
+		// Forward from the last tab wraps around to the first.
+		await store.switchToRelativeTab(1);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/a.md");
+		await store.switchToRelativeTab(-1);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/c.md");
+		await store.switchToRelativeTab(-1);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/b.md");
+	});
+
+	it("has nowhere to cycle to with a single tab", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		await store.openPathInNewTab("/workspace/a.md");
+
+		expect(store.tabIdAtOffset(1)).toBeNull();
+		expect(store.tabIdAtOffset(-1)).toBeNull();
+	});
+
+	it("jumps to a tab by slot, with slot 9 meaning the last tab", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		await threeTabs(store);
+
+		await store.switchToTabSlot(2);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/b.md");
+		await store.switchToTabSlot(9);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/c.md");
+		// A slot past the last tab does nothing rather than clamping.
+		await store.switchToTabSlot(5);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/c.md");
+	});
+
+	it("closes the tab on screen", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		await threeTabs(store);
+
+		await store.closeActiveTab();
+
+		expect(store.tabsStore.get().tabs).toHaveLength(2);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/b.md");
+	});
+});
+
+describe("tab indicators", () => {
+	beforeEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it("marks unsaved drafts, and a conflict apart from them", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const store = await loadStore(api);
+		const { documentIndicator } = store;
+
+		await store.openPathInNewTab("/workspace/dirty.md");
+		const dirtyTabId = store.tabsStore.get().activeTabId;
+		store.updateEditorContent("/workspace/dirty.md", "mine");
+		expect(documentIndicator(store.viewerStore.get())).toBe("dirty");
+
+		// The save on the way out fails, so the tab is backgrounded still dirty.
+		disk.failNextWrite();
+		await store.openPathInNewTab("/workspace/clean.md");
+		const dirtyBuffer = store.tabsStore
+			.get()
+			.tabs.find((tab) => tab.id === dirtyTabId)?.buffer;
+		expect(documentIndicator(dirtyBuffer)).toBe("dirty");
+		expect(documentIndicator(store.viewerStore.get())).toBe("none");
+
+		store.handleExternalFileChange("/workspace/dirty.md", "theirs");
+		expect(
+			documentIndicator(
+				store.tabsStore.get().tabs.find((tab) => tab.id === dirtyTabId)?.buffer,
+			),
+		).toBe("conflict");
+	});
+
+	it("leaves notes with no draft to lose unmarked", async () => {
+		const api = createDesktopApi();
+		const { documentIndicator, emptyDoc } = await loadStore(api);
+		const base = emptyDoc();
+
+		expect(documentIndicator(null)).toBe("none");
+		expect(documentIndicator(base)).toBe("none");
+		// The changelog is read-only, and so is an image.
+		expect(
+			documentIndicator({
+				...base,
+				currentPath: CHANGELOG_PATH,
+				content: "edited",
+			}),
+		).toBe("none");
+		expect(
+			documentIndicator({
+				...base,
+				currentPath: "/workspace/diagram.png",
+				content: "edited",
+			}),
+		).toBe("none");
 	});
 });
