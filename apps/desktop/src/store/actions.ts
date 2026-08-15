@@ -1415,14 +1415,9 @@ const { run: loadInternalPath, invalidate: invalidateLoadPath } = takeLatest(
 			}
 			if (isStale()) return;
 			const currentPath = viewerStore.get().currentPath;
-			// Navigating inside a tab leaves the old note behind entirely, unless
-			// another tab owns it (which the one-tab-per-path invariant rules out).
-			const owner = currentPath ? tabForPath(currentPath) : null;
-			if (
-				currentPath &&
-				!pathEquals(currentPath, path) &&
-				(!owner || owner === tabsStore.get().activeTabId)
-			) {
+			// Navigating inside a tab leaves the old note behind entirely: the
+			// one-tab-per-path invariant means no other tab is still showing it.
+			if (currentPath && !pathEquals(currentPath, path)) {
 				titleManager.stop(currentPath);
 			}
 			appStore.set((state) => withOpenedDoc(state, path, content));

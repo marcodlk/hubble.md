@@ -1739,8 +1739,8 @@ function registerIpc() {
 			const createWatcher = async () => {
 				const watcher = chokidar.watch(resolved, {
 					ignoreInitial: true,
-					// Only the active file uses this watcher. The sidebar refreshes from
-					// snapshots so large workspaces do not create one watcher per folder.
+					// Only open notes use this watcher, one per tab. The sidebar refreshes
+					// from snapshots so large workspaces do not create one per folder.
 					depth: 0,
 				});
 				const emitFile = (changedPath: string) => {

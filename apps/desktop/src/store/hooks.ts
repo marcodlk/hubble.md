@@ -29,17 +29,30 @@ function isWatchable(path: string | null | undefined): path is string {
 export const WATCHED_PATH_SEPARATOR = "\n";
 
 /**
- * Every open tab's watchable note path, active tab first. Returned as one
- * separator-joined string rather than an array so the watcher effect compares
- * by value and re-subscribes only when the set of notes itself changes.
+ * Sorted and de-duplicated, so the key names the *set* of watched notes rather
+ * than an arrangement of it. Switching tabs only moves a path between the
+ * active slice and a buffer, which must not read as a different set.
+ */
+function watchedPathsKey(paths: (string | null | undefined)[]): string {
+	return [...new Set(paths.filter(isWatchable))]
+		.sort()
+		.join(WATCHED_PATH_SEPARATOR);
+}
+
+/**
+ * Every open tab's watchable note path. Returned as one separator-joined
+ * string rather than an array so the watcher effect compares by value and
+ * re-subscribes only when the set of notes itself changes, not on every tab
+ * switch: tearing down every watcher to rebuild the same ones leaves a window
+ * where an external edit goes unseen.
  */
 export function useWatchedPathsKey(): string {
 	const activePath = useStoreValue(currentPathStore);
 	const backgroundKey = useStoreValue(tabsStore, (state) =>
-		backgroundTabPaths(state).filter(isWatchable).join(WATCHED_PATH_SEPARATOR),
+		watchedPathsKey(backgroundTabPaths(state)),
 	);
-	const active = isWatchable(activePath) ? activePath : null;
-	return [active, backgroundKey]
-		.filter((part) => !!part)
-		.join(WATCHED_PATH_SEPARATOR);
+	return watchedPathsKey([
+		activePath,
+		...(backgroundKey ? backgroundKey.split(WATCHED_PATH_SEPARATOR) : []),
+	]);
 }

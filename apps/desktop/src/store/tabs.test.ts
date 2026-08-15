@@ -768,6 +768,33 @@ describe("tab-aware document reads", () => {
 		expect(store.tabsStore.get().tabs).toHaveLength(1);
 		expect(store.viewerStore.get().currentPath).toBe("/workspace/keep.md");
 	});
+
+	it("does not restore the history of a tab the delete closed", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		// Undo dismisses its toast, and sonner schedules that on a frame.
+		vi.stubGlobal("requestAnimationFrame", (callback: () => void) => {
+			callback();
+			return 0;
+		});
+		store.appStore.set((current) => ({
+			...current,
+			workspace: { ...current.workspace, workspacePath: "/workspace" },
+		}));
+		await store.openPathInNewTab("/workspace/gone.md");
+		const closedTabId = store.tabsStore.get().activeTabId;
+		await store.openPathInNewTab("/workspace/keep.md");
+
+		await store.deleteSidebarItems([
+			{ kind: "file", path: "/workspace/gone.md" },
+		]);
+		await store.undoDelete();
+
+		// The file comes back; the tab does not, so neither does its stack.
+		expect(api.restoreDelete).toHaveBeenCalled();
+		expect(store.tabForPath("/workspace/gone.md")).toBeNull();
+		expect(store.historyStore.get().byTab[closedTabId]).toBeUndefined();
+	});
 });
 
 describe("tab-aware title generation", () => {

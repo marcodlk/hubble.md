@@ -55,6 +55,23 @@ function covers(path: string, items: SidebarDeleteItem[]) {
 	);
 }
 
+/**
+ * The pre-delete history, minus the stacks of tabs the delete closed. Undo
+ * restores the files, not the tabs, so those stacks would sit in `byTab`
+ * forever under ids no tab will ever have again.
+ */
+function restorableHistory(deletion: PendingDelete) {
+	const openTabIds = new Set(Object.keys(deletion.historyAfter.byTab));
+	return {
+		...deletion.historyBefore,
+		byTab: Object.fromEntries(
+			Object.entries(deletion.historyBefore.byTab).filter(([tabId]) =>
+				openTabIds.has(tabId),
+			),
+		),
+	};
+}
+
 export function createDeleteActions(deps: DeleteDeps) {
 	let blockedItems: SidebarDeleteItem[] | null = null;
 	let pending: PendingDelete | null = null;
@@ -127,7 +144,7 @@ export function createDeleteActions(deps: DeleteDeps) {
 				},
 			}));
 			if (historyStore.get() === deletion.historyAfter) {
-				historyStore.set(deletion.historyBefore);
+				historyStore.set(restorableHistory(deletion));
 			}
 			await deps.refreshFiles(deletion.workspacePath);
 			if (deletion.reopenPath && viewerStore.get().currentPath === null) {
