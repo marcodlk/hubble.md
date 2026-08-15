@@ -28,6 +28,11 @@
 				},
 			}));
 
+	// `files.open(path)` keeps replacing the note on screen; only an explicit
+	// `{ newTab: true }` sends the file to a tab of its own.
+	const wantsNewTab = (options) =>
+		Boolean(options && typeof options === "object" && options.newTab);
+
 	window.addEventListener("message", (event) => {
 		const data = event.data;
 		if (!data || data.type !== "hubble:response") return;
@@ -49,8 +54,10 @@
 			safeList: (glob = "**/*") => safeRequestHubble("files.list", { glob }),
 			read: (path) => requestHubble("files.read", { path }),
 			safeRead: (path) => safeRequestHubble("files.read", { path }),
-			open: (path) => requestHubble("files.open", { path }),
-			safeOpen: (path) => safeRequestHubble("files.open", { path }),
+			open: (path, options) =>
+				requestHubble("files.open", { path, newTab: wantsNewTab(options) }),
+			safeOpen: (path, options) =>
+				safeRequestHubble("files.open", { path, newTab: wantsNewTab(options) }),
 			create: (input) => requestHubble("files.create", { input }),
 			safeCreate: (input) => safeRequestHubble("files.create", { input }),
 			update: (path, patch) => requestHubble("files.update", { path, patch }),

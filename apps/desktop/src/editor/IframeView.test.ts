@@ -9,7 +9,16 @@ const desktopApi = vi.hoisted(() => ({
 	resolvePath: vi.fn(),
 }));
 
+const actions = vi.hoisted(() => ({
+	deleteMarkdownFile: vi.fn(),
+	loadPath: vi.fn(),
+	openPathInNewTab: vi.fn(),
+	refreshFiles: vi.fn(),
+	touchFile: vi.fn(),
+}));
+
 vi.mock("../desktopApi", () => ({ desktopApi }));
+vi.mock("../store/actions", () => actions);
 
 import { handleHtmlAppRequest, resolveHtmlAppGlob } from "./IframeView";
 
@@ -59,6 +68,66 @@ describe("HTML app relative globs", () => {
 		await expect(
 			resolveHtmlAppGlob(workspacePath, htmlAppPath, "../../../*.md"),
 		).rejects.toThrow("must stay inside the workspace");
+	});
+});
+
+describe("HTML app files.open", () => {
+	beforeEach(() => {
+		actions.loadPath.mockReset();
+		actions.openPathInNewTab.mockReset();
+		desktopApi.pathExists.mockReset();
+		desktopApi.realPath.mockReset();
+		desktopApi.resolvePath.mockReset();
+		desktopApi.platform = "linux";
+		desktopApi.pathExists.mockResolvedValue(true);
+		desktopApi.realPath.mockImplementation(async (path: string) => path);
+		desktopApi.resolvePath.mockImplementation(async (path: string) =>
+			posix.resolve(path),
+		);
+	});
+
+	const openFile = (params: Record<string, unknown>) =>
+		handleHtmlAppRequest(
+			{ type: "hubble:request", id: 1, method: "files.open", params },
+			workspacePath,
+			htmlAppPath,
+		);
+
+	it("replaces the current tab when no options are passed", async () => {
+		await expect(openFile({ path: "notes/plan.md" })).resolves.toEqual({
+			ok: true,
+			value: { path: "notes/plan.md", newTab: false },
+		});
+		expect(actions.loadPath).toHaveBeenCalledWith("/vault/notes/plan.md");
+		expect(actions.openPathInNewTab).not.toHaveBeenCalled();
+	});
+
+	it("keeps replacing the current tab when newTab is falsy", async () => {
+		await expect(
+			openFile({ path: "notes/plan.md", newTab: false }),
+		).resolves.toMatchObject({ ok: true });
+		expect(actions.loadPath).toHaveBeenCalledTimes(1);
+		expect(actions.openPathInNewTab).not.toHaveBeenCalled();
+	});
+
+	it("opens a new tab when newTab is true", async () => {
+		await expect(
+			openFile({ path: "./sibling.md", newTab: true }),
+		).resolves.toEqual({
+			ok: true,
+			value: { path: "apps/project-dashboard/sibling.md", newTab: true },
+		});
+		expect(actions.openPathInNewTab).toHaveBeenCalledWith(
+			"/vault/apps/project-dashboard/sibling.md",
+		);
+		expect(actions.loadPath).not.toHaveBeenCalled();
+	});
+
+	it("rejects a non-boolean newTab without opening anything", async () => {
+		const response = await openFile({ path: "notes/plan.md", newTab: "yes" });
+		expect(response.ok).toBe(false);
+		expect(actions.loadPath).not.toHaveBeenCalled();
+		expect(actions.openPathInNewTab).not.toHaveBeenCalled();
 	});
 });
 

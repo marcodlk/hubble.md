@@ -17,6 +17,7 @@ import {
 import {
 	deleteMarkdownFile,
 	loadPath,
+	openPathInNewTab,
 	refreshFiles,
 	touchFile,
 } from "../store/actions";
@@ -64,6 +65,8 @@ const markdownPathSchema = fileReferenceSchema.refine(
 	hasMarkdownExtension,
 	"File path must point to a Markdown file.",
 );
+/** Absent or false keeps `files.open` replacing the note in the current tab. */
+const newTabSchema = z.boolean().optional().default(false);
 const createInputSchema = z
 	.object({
 		path: fileReferenceSchema.transform(withMarkdownExtension),
@@ -261,10 +264,11 @@ export async function handleHtmlAppRequest(
 				parseInput(markdownPathSchema, params.path),
 				true,
 			);
-			await openMarkdownFile(workspacePath, path);
+			const newTab = parseInput(newTabSchema, params.newTab);
+			await openMarkdownFile(workspacePath, path, newTab);
 			return {
 				ok: true,
-				value: { path },
+				value: { path, newTab },
 			};
 		}
 		if (request.method === "files.create") {
@@ -371,12 +375,21 @@ async function readMarkdownFile(workspacePath: string, path: string) {
 
 /**
  * Opens a workspace Markdown file in Hubble after proving the app stayed inside
- * the current workspace.
+ * the current workspace. `newTab` sends the file to a tab of its own — the same
+ * path a second-instance file open takes — so the calling app keeps its tab.
  */
-async function openMarkdownFile(workspacePath: string, path: string) {
+async function openMarkdownFile(
+	workspacePath: string,
+	path: string,
+	newTab = false,
+) {
 	const absolutePath = await resolveWorkspaceFile(workspacePath, path, {
 		exists: true,
 	});
+	if (newTab) {
+		await openPathInNewTab(absolutePath);
+		return;
+	}
 	await loadPath(absolutePath);
 }
 
