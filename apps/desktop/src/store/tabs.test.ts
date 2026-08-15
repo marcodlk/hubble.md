@@ -74,10 +74,12 @@ function withFakeDisk(api: MockDesktopApi) {
  * The store modules are singletons that capture window.desktopApi at import
  * time, so every test re-imports them against a freshly stubbed environment.
  */
-async function loadStore(api: MockDesktopApi) {
+async function loadStore(api: MockDesktopApi, persisted?: unknown) {
 	vi.resetModules();
 	vi.stubGlobal("localStorage", {
-		getItem: vi.fn(() => null),
+		getItem: vi.fn(() =>
+			persisted === undefined ? null : JSON.stringify(persisted),
+		),
 		setItem: vi.fn(),
 	});
 	vi.stubGlobal("window", {
@@ -988,5 +990,392 @@ describe("tab indicators", () => {
 				content: "edited",
 			}),
 		).toBe("none");
+	});
+});
+
+/**
+ * The open notes of a workspace survive a relaunch and a trip through another
+ * workspace. Only the paths are persisted, so what comes back is the tab set,
+ * not the session: no drafts, no conflicts, no back stack.
+ */
+describe("per-workspace tab sets", () => {
+	beforeEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	/** Recording runs on a microtask, so let it settle before reading it. */
+	function settle() {
+		return new Promise((resolve) => setTimeout(resolve, 0));
+	}
+
+	function recordFor(
+		store: Awaited<ReturnType<typeof loadStore>>,
+		workspacePath: string,
+	) {
+		return store.appStore.get().workspace.openTabsByWorkspace[workspacePath];
+	}
+
+	async function loadPersistence(persisted?: unknown) {
+		vi.resetModules();
+		vi.stubGlobal("localStorage", {
+			getItem: vi.fn(() =>
+				persisted === undefined ? null : JSON.stringify(persisted),
+			),
+			setItem: vi.fn(),
+		});
+		// state.ts and persistence.ts import each other, so the pair has to be
+		// entered through state.ts for `STORAGE_KEY` to exist by hydration time.
+		await import("./state");
+		return await import("./persistence");
+	}
+
+	/** Opens `paths` as tabs in a fresh workspace, leaving the last one active. */
+	async function openTabs(
+		store: Awaited<ReturnType<typeof loadStore>>,
+		workspacePath: string,
+		paths: string[],
+	) {
+		await store.openWorkspace(workspacePath);
+		for (const path of paths) await store.openPathInNewTab(path);
+		await settle();
+	}
+
+	it("round-trips a workspace's tab set through storage", async () => {
+		const persistence = await loadPersistence();
+		const state = persistence.getInitialState();
+		state.workspace.openTabsByWorkspace = {
+			"/workspace": {
+				paths: ["/workspace/a.md", "/workspace/b.md"],
+				activeIndex: 1,
+			},
+		};
+
+		const rehydrated = (
+			await loadPersistence(persistence.serialize(state))
+		).getInitialState();
+
+		expect(rehydrated.workspace.openTabsByWorkspace).toEqual({
+			"/workspace": {
+				paths: ["/workspace/a.md", "/workspace/b.md"],
+				activeIndex: 1,
+			},
+		});
+	});
+
+	it("drops malformed tab sets on hydration", async () => {
+		const { getInitialState } = await loadPersistence({
+			workspace: {
+				openTabsByWorkspace: {
+					"/ok": { paths: ["/ok/a.md", 3, ""], activeIndex: 9 },
+					"/list": [],
+					"/paths": { paths: "nope" },
+					"/empty": { paths: [] },
+					"/index": { paths: ["/index/a.md"] },
+				},
+			},
+		});
+
+		expect(getInitialState().workspace.openTabsByWorkspace).toEqual({
+			"/ok": { paths: ["/ok/a.md"], activeIndex: 0 },
+			"/index": { paths: ["/index/a.md"], activeIndex: 0 },
+		});
+
+		const garbage = await loadPersistence({
+			workspace: { openTabsByWorkspace: "garbage" },
+		});
+		expect(garbage.getInitialState().workspace.openTabsByWorkspace).toEqual({});
+	});
+
+	it("follows opens, switches, in-tab navigation and closes", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		await openTabs(store, "/workspace", ["/workspace/a.md", "/workspace/b.md"]);
+
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: ["/workspace/a.md", "/workspace/b.md"],
+			activeIndex: 1,
+		});
+
+		const firstTabId = store.tabsStore
+			.get()
+			.tabs.find((tab) => tab.id !== store.tabsStore.get().activeTabId)?.id;
+		await store.switchToTab(firstTabId as string);
+		await settle();
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: ["/workspace/a.md", "/workspace/b.md"],
+			activeIndex: 0,
+		});
+
+		// Navigating inside the first tab replaces its path in place.
+		await store.loadPath("/workspace/c.md");
+		await settle();
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: ["/workspace/c.md", "/workspace/b.md"],
+			activeIndex: 0,
+		});
+
+		await store.closeTab(store.tabsStore.get().activeTabId);
+		await settle();
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: ["/workspace/b.md"],
+			activeIndex: 0,
+		});
+	});
+
+	it("skips loose files opened without a workspace", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		store.beginOpenTabsRecording();
+
+		await store.openPathInNewTab("/elsewhere/a.md");
+		await settle();
+
+		expect(store.appStore.get().workspace.openTabsByWorkspace).toEqual({});
+	});
+
+	it("records notes open from outside the workspace root", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		await openTabs(store, "/workspace", ["/workspace/a.md", "/elsewhere/b.md"]);
+
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: ["/workspace/a.md", "/elsewhere/b.md"],
+			activeIndex: 1,
+		});
+	});
+
+	it("follows renames, folder moves and deletes", async () => {
+		const api = createDesktopApi();
+		withFakeDisk(api);
+		const store = await loadStore(api);
+		await openTabs(store, "/workspace", [
+			"/workspace/docs/a.md",
+			"/workspace/b.md",
+		]);
+
+		await store.renameMarkdownFile("/workspace/b.md", "renamed");
+		await settle();
+		expect(recordFor(store, "/workspace")?.paths).toEqual([
+			"/workspace/docs/a.md",
+			"/workspace/renamed.md",
+		]);
+
+		await store.renameFolder("/workspace/docs", "docs", "/workspace/sub/docs");
+		await settle();
+		expect(recordFor(store, "/workspace")?.paths).toEqual([
+			"/workspace/sub/docs/a.md",
+			"/workspace/renamed.md",
+		]);
+
+		await store.deleteMarkdownFile("/workspace/sub/docs/a.md");
+		await settle();
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: ["/workspace/renamed.md"],
+			activeIndex: 0,
+		});
+	});
+
+	it("reopens a recorded tab set with clean buffers and seeded histories", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api, {
+			workspace: {
+				workspacePath: "/workspace",
+				openTabsByWorkspace: {
+					"/workspace": {
+						paths: ["/workspace/a.md", "/workspace/b.md", "/workspace/c.md"],
+						activeIndex: 1,
+					},
+				},
+			},
+		});
+
+		expect(await store.restoreWorkspaceTabs("/workspace")).toBe(true);
+
+		const { tabs, activeTabId } = store.tabsStore.get();
+		expect(tabs).toHaveLength(3);
+		expect(tabs[1].id).toBe(activeTabId);
+		expect(store.viewerStore.get()).toMatchObject({
+			currentPath: "/workspace/b.md",
+			content: "content:/workspace/b.md",
+			diskContent: "content:/workspace/b.md",
+			externalChange: { kind: "none" },
+			status: "ready",
+			viewMode: "rich",
+		});
+		expect(tabs[0].buffer).toMatchObject({
+			currentPath: "/workspace/a.md",
+			content: "content:/workspace/a.md",
+			diskContent: "content:/workspace/a.md",
+			viewMode: "rich",
+		});
+		expect(tabs[2].buffer).toMatchObject({ currentPath: "/workspace/c.md" });
+		expect(store.historyStore.get().byTab[tabs[0].id]).toEqual({
+			entries: ["/workspace/a.md"],
+			index: 0,
+		});
+		// Each tab is navigable onwards, but has nothing behind it.
+		expect(store.canGoBack()).toBe(false);
+		expect(store.appStore.get().document.lastOpenedPath).toBe(
+			"/workspace/b.md",
+		);
+	});
+
+	it("drops notes that no longer exist and clamps the active tab", async () => {
+		const api = createDesktopApi();
+		api.readFileText.mockImplementation(async (path: string) => {
+			if (path === "/workspace/gone.md") throw new Error("ENOENT");
+			return `content:${path}`;
+		});
+		const store = await loadStore(api, {
+			workspace: {
+				workspacePath: "/workspace",
+				openTabsByWorkspace: {
+					"/workspace": {
+						paths: ["/workspace/a.md", "/workspace/gone.md"],
+						activeIndex: 1,
+					},
+				},
+			},
+		});
+
+		expect(await store.restoreWorkspaceTabs("/workspace")).toBe(true);
+
+		expect(store.tabsStore.get().tabs).toHaveLength(1);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/a.md");
+		// The missing note leaves the record straight away.
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: ["/workspace/a.md"],
+			activeIndex: 0,
+		});
+	});
+
+	it("clamps an active index that points past the tab set", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		store.appStore.set((current) => ({
+			...current,
+			workspace: {
+				...current.workspace,
+				workspacePath: "/workspace",
+				openTabsByWorkspace: {
+					"/workspace": {
+						paths: ["/workspace/a.md", "/workspace/b.md"],
+						activeIndex: 7,
+					},
+				},
+			},
+		}));
+
+		expect(await store.restoreWorkspaceTabs("/workspace")).toBe(true);
+
+		const { tabs, activeTabId } = store.tabsStore.get();
+		expect(tabs[1].id).toBe(activeTabId);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/b.md");
+	});
+
+	it("reports nothing to restore when the workspace has no record", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+
+		expect(await store.restoreWorkspaceTabs("/workspace")).toBe(false);
+		expect(store.tabsStore.get().tabs).toHaveLength(1);
+		expect(store.viewerStore.get().currentPath).toBeNull();
+	});
+
+	it("restores each workspace's own tabs when switching between them", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		await openTabs(store, "/one", ["/one/a.md", "/one/b.md"]);
+
+		await store.openWorkspace("/two");
+		await settle();
+
+		// The outgoing workspace keeps the set it was left on.
+		expect(recordFor(store, "/one")).toEqual({
+			paths: ["/one/a.md", "/one/b.md"],
+			activeIndex: 1,
+		});
+		expect(store.tabsStore.get().tabs).toHaveLength(1);
+		expect(store.viewerStore.get().currentPath).toBeNull();
+
+		await store.openPathInNewTab("/two/c.md");
+		await settle();
+		expect(recordFor(store, "/two")).toEqual({
+			paths: ["/two/c.md"],
+			activeIndex: 0,
+		});
+
+		await store.openWorkspace("/one");
+		await settle();
+
+		expect(store.tabsStore.get().tabs).toHaveLength(2);
+		expect(store.viewerStore.get().currentPath).toBe("/one/b.md");
+		expect(recordFor(store, "/one")).toEqual({
+			paths: ["/one/a.md", "/one/b.md"],
+			activeIndex: 1,
+		});
+		// The workspace left behind keeps its own set intact.
+		expect(recordFor(store, "/two")).toEqual({
+			paths: ["/two/c.md"],
+			activeIndex: 0,
+		});
+
+		await store.openWorkspace("/two");
+		await settle();
+
+		expect(store.tabsStore.get().tabs).toHaveLength(1);
+		expect(store.viewerStore.get().currentPath).toBe("/two/c.md");
+	});
+
+	it("opens a launch file in its own tab beside the restored set", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api, {
+			workspace: {
+				workspacePath: "/workspace",
+				openTabsByWorkspace: {
+					"/workspace": {
+						paths: ["/workspace/a.md", "/workspace/b.md"],
+						activeIndex: 0,
+					},
+				},
+			},
+		});
+
+		// What App's init effect does for a cold launch from Finder.
+		await store.restoreWorkspaceTabs("/workspace");
+		await store.openPathInNewTab("/workspace/launched.md");
+		await settle();
+
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: ["/workspace/a.md", "/workspace/b.md", "/workspace/launched.md"],
+			activeIndex: 2,
+		});
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/launched.md");
+	});
+
+	it("reveals the launch file instead of duplicating a restored tab", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api, {
+			workspace: {
+				workspacePath: "/workspace",
+				openTabsByWorkspace: {
+					"/workspace": {
+						paths: ["/workspace/a.md", "/workspace/b.md"],
+						activeIndex: 1,
+					},
+				},
+			},
+		});
+
+		await store.restoreWorkspaceTabs("/workspace");
+		await store.openPathInNewTab("/workspace/a.md");
+		await settle();
+
+		expect(store.tabsStore.get().tabs).toHaveLength(2);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/a.md");
+		expect(recordFor(store, "/workspace")).toEqual({
+			paths: ["/workspace/a.md", "/workspace/b.md"],
+			activeIndex: 0,
+		});
 	});
 });

@@ -8,10 +8,20 @@ import {
 	type SortMode,
 } from "./state";
 
+/**
+ * A workspace's open tabs, as paths only. Drafts, conflicts and per-tab history
+ * stay in memory: a relaunch reopens the notes, not the unsaved session.
+ */
+export type OpenTabsRecord = {
+	paths: string[];
+	activeIndex: number;
+};
+
 type WorkspaceState = {
 	workspacePath: string | null;
 	recentWorkspaces: string[];
 	lastOpenedPaths: Record<string, string>;
+	openTabsByWorkspace: Record<string, OpenTabsRecord>;
 	sortMode: SortMode;
 	files: FileEntry[];
 	folders: FolderEntry[];
@@ -52,6 +62,7 @@ type Persisted = {
 		workspacePath?: string | null;
 		recentWorkspaces?: string[];
 		lastOpenedPaths?: Record<string, string>;
+		openTabsByWorkspace?: Record<string, OpenTabsRecord>;
 		sortMode?: SortMode;
 	};
 	document?: { lastOpenedPath?: string | null };
@@ -83,6 +94,35 @@ function readStorage<T>(key: string): T | null {
 	}
 }
 
+/**
+ * Rebuilds the per-workspace tab sets from storage. Anything malformed is
+ * dropped rather than trusted: a bad entry would otherwise reopen the app onto
+ * a broken tab set with no way back.
+ */
+function hydrateOpenTabs(value: unknown): Record<string, OpenTabsRecord> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const records: Record<string, OpenTabsRecord> = {};
+	for (const [workspacePath, record] of Object.entries(value)) {
+		if (!record || typeof record !== "object" || Array.isArray(record))
+			continue;
+		const { paths, activeIndex } = record as {
+			paths?: unknown;
+			activeIndex?: unknown;
+		};
+		if (!Array.isArray(paths)) continue;
+		const openPaths = paths.filter(
+			(path): path is string => typeof path === "string" && path.length > 0,
+		);
+		if (openPaths.length === 0) continue;
+		const index = Number.isInteger(activeIndex) ? (activeIndex as number) : 0;
+		records[workspacePath] = {
+			paths: openPaths,
+			activeIndex: Math.min(Math.max(index, 0), openPaths.length - 1),
+		};
+	}
+	return records;
+}
+
 function hydrateWorkspace(ws: Persisted["workspace"]): WorkspaceState {
 	return {
 		workspacePath: ws?.workspacePath ?? null,
@@ -95,6 +135,7 @@ function hydrateWorkspace(ws: Persisted["workspace"]): WorkspaceState {
 			!Array.isArray(ws.lastOpenedPaths)
 				? ws.lastOpenedPaths
 				: {},
+		openTabsByWorkspace: hydrateOpenTabs(ws?.openTabsByWorkspace),
 		sortMode: ws?.sortMode === "alpha" ? "alpha" : "recent",
 		files: [],
 		folders: [],
@@ -148,6 +189,7 @@ export function serialize(state: DesktopState): Persisted {
 			workspacePath: state.workspace.workspacePath,
 			recentWorkspaces: state.workspace.recentWorkspaces,
 			lastOpenedPaths: state.workspace.lastOpenedPaths,
+			openTabsByWorkspace: state.workspace.openTabsByWorkspace,
 			sortMode: state.workspace.sortMode,
 		},
 		document: {

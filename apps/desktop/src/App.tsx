@@ -83,6 +83,7 @@ import {
 	refreshFilesDebounced,
 	reloadFromDiskConflict,
 	requestChatAboutNote,
+	restoreWorkspaceTabs,
 	savePathContent,
 	setLastSeenVersion,
 	setReviewThreads,
@@ -115,7 +116,11 @@ import {
 	workspacePathStore,
 	workspaceStore,
 } from "./store/state";
-import { isPathOpenInAnyTab, tabsStore } from "./store/tabs";
+import {
+	beginOpenTabsRecording,
+	isPathOpenInAnyTab,
+	tabsStore,
+} from "./store/tabs";
 import { isDarkTheme, subscribeTheme } from "./theme";
 
 // Forces editor refresh when underlying TipTap extensions change
@@ -647,11 +652,21 @@ function App() {
 	useEffect(() => {
 		let active = true;
 		const init = async () => {
+			// The workspace's own tab set comes back first, so a note opened from
+			// Finder joins the session instead of replacing it.
+			const restoreTabs = async () => {
+				const persistedWorkspace = workspaceStore.get().workspacePath;
+				return persistedWorkspace
+					? await restoreWorkspaceTabs(persistedWorkspace)
+					: false;
+			};
 			const launchPath = await desktopApi.getLaunchFilePath();
 			if (!active) return;
 
 			if (typeof launchPath === "string" && launchPath.length > 0) {
-				await loadPath(launchPath);
+				await restoreTabs();
+				if (!active) return;
+				await openPathInNewTab(launchPath);
 				return;
 			}
 			const launchWorkspacePath = await desktopApi.getLaunchWorkspacePath();
@@ -667,6 +682,9 @@ function App() {
 				}
 				return;
 			}
+			if (await restoreTabs()) return;
+			if (!active) return;
+
 			const nextState = viewerStore.get();
 			const workspace = workspaceStore.get();
 			const lastPath =
@@ -683,7 +701,9 @@ function App() {
 				});
 			}
 		};
-		void init();
+		// Whatever startup lands on is the session from here on, and every later
+		// tab change is recorded against the workspace it belongs to.
+		void init().finally(beginOpenTabsRecording);
 		return () => {
 			active = false;
 		};

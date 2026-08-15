@@ -57,6 +57,7 @@ import {
 	pushHistory,
 	resetHistory,
 	rewriteHistory,
+	seedTabHistory,
 	setHistory,
 } from "./history";
 import type { CodeFileOpenMode, TerminalPosition } from "./persistence";
@@ -96,10 +97,14 @@ import {
 	activateTab,
 	addTab,
 	backgroundBuffers,
+	beginOpenTabsRecording,
 	documentForTab,
 	getDocumentForPath,
+	installTabs,
+	isSavableDoc,
 	openDocuments,
 	openTabPaths,
+	recordOpenTabs,
 	removeTab,
 	resetTabs,
 	rewriteTabBufferPaths,
@@ -108,6 +113,7 @@ import {
 	tabIdForSlot,
 	tabsStore,
 	updateDocumentForPath,
+	withOpenTabsRecordingSuppressed,
 } from "./tabs";
 import { createTitleManager } from "./titleManagement";
 import { applyWorkspaceDelta } from "./workspaceDelta";
@@ -785,30 +791,94 @@ export async function openWorkspace(path?: string) {
 		await expireDeleteUndo();
 	}
 
-	workspaceStore.set((state) => {
-		const filtered = state.recentWorkspaces.filter((p) => p !== nextPath);
-		return {
-			...state,
-			workspacePath: nextPath,
-			recentWorkspaces: [nextPath, ...filtered].slice(0, MAX_RECENT),
-			files: [],
-			pinnedNotes: [],
-		};
+	// The outgoing workspace keeps the tab set it ends on, flushed drafts and
+	// all, so coming back to it restores exactly these notes.
+	recordOpenTabs();
+
+	await withOpenTabsRecordingSuppressed(async () => {
+		workspaceStore.set((state) => {
+			const filtered = state.recentWorkspaces.filter((p) => p !== nextPath);
+			return {
+				...state,
+				workspacePath: nextPath,
+				recentWorkspaces: [nextPath, ...filtered].slice(0, MAX_RECENT),
+				files: [],
+				pinnedNotes: [],
+			};
+		});
+		switcherOpenStore.set(false);
+		// Tabs belong to the workspace that opened them: the incoming workspace
+		// gets its own set back, or a single empty tab when it has none.
+		resetTabs();
+		resetHistory();
+		await Promise.all([refreshFileList(nextPath), loadPinnedNotes(nextPath)]);
+
+		if (await restoreWorkspaceTabs(nextPath)) return;
+
+		const lastFile = workspaceStore.get().lastOpenedPaths[nextPath];
+		if (lastFile) {
+			await loadPath(lastFile, { missing: "silent", launchExternal: false });
+			return;
+		}
+
+		clearViewer();
 	});
-	switcherOpenStore.set(false);
-	// Tabs belong to the workspace that opened them. Per-workspace tab sets are a
-	// later slice; for now the new workspace starts on one empty tab.
-	resetTabs();
-	resetHistory();
-	await Promise.all([refreshFileList(nextPath), loadPinnedNotes(nextPath)]);
+	beginOpenTabsRecording();
+}
 
-	const lastFile = workspaceStore.get().lastOpenedPaths[nextPath];
-	if (lastFile) {
-		await loadPath(lastFile, { missing: "silent", launchExternal: false });
-		return;
+/**
+ * Reopens the notes a workspace was last left on, one tab each, with the tab
+ * that was on screen active again. Notes that no longer exist are dropped in
+ * silence, the way a missing `lastOpenedPath` is. Returns whether any tab was
+ * restored; `false` leaves the caller on its single-note fallback.
+ *
+ * Only the paths were persisted, so every note comes back clean, in the default
+ * view mode, with a history stack holding just itself.
+ */
+export async function restoreWorkspaceTabs(
+	workspacePath: string,
+): Promise<boolean> {
+	const record = workspaceStore.get().openTabsByWorkspace[workspacePath];
+	if (!record || record.paths.length === 0) return false;
+	const activePath =
+		record.paths[
+			Math.min(Math.max(record.activeIndex, 0), record.paths.length - 1)
+		];
+
+	const documents: DocumentState[] = [];
+	for (const path of record.paths) {
+		const kind = fileKindForPath(path);
+		// External files never take over the viewer, so they never held a tab.
+		if (kind === "external") continue;
+		try {
+			if (kind === "viewer" && !(await desktopApi.pathExists(path))) continue;
+			const content =
+				kind === "viewer" ? "" : await desktopApi.readFileText(path);
+			documents.push({
+				...emptyDoc(path),
+				currentPath: path,
+				...cleanFileState(content),
+			});
+		} catch {
+			// Deleted or unreadable since the last session: drop it silently.
+		}
 	}
+	if (documents.length === 0) return false;
 
-	clearViewer();
+	const activeIndex = Math.max(
+		documents.findIndex((document) => document.currentPath === activePath),
+		0,
+	);
+	const tabIds = installTabs(documents, activeIndex);
+	tabIds.forEach((tabId, index) => {
+		const path = documents[index].currentPath;
+		if (path) seedTabHistory(tabId, path);
+	});
+	rememberOpenedDoc(documents[activeIndex]);
+	// The restored set is the session from here on, minus any note that went
+	// missing since it was recorded.
+	beginOpenTabsRecording();
+	return true;
 }
 
 export function updateEditorContent(path: string, content: string) {
@@ -1520,17 +1590,6 @@ export async function openChangelog(): Promise<boolean> {
 
 /** Serializes switches so a second click waits instead of being dropped. */
 let switchQueue: Promise<void> = Promise.resolve();
-
-function isSavableDoc(doc: DocumentState): doc is DocumentState & {
-	currentPath: string;
-} {
-	return (
-		doc.currentPath !== null &&
-		!isChangelogPath(doc.currentPath) &&
-		isEditableFile(doc.currentPath) &&
-		doc.externalChange.kind !== "conflict"
-	);
-}
 
 /**
  * Records the tab's note as the one to reopen on relaunch, mirroring what

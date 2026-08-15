@@ -1,11 +1,14 @@
 import { store } from "@simplestack/store";
 import { isChangelogPath } from "../lib/changelogNote";
 import { isEditableFile, pathEquals, replacePathPrefix } from "../lib/filePath";
+import type { OpenTabsRecord } from "./persistence";
 import {
+	currentPathStore,
 	type DocumentState,
 	emptyDoc,
 	getBaseline,
 	viewerStore,
+	workspaceStore,
 } from "./state";
 
 /**
@@ -45,7 +48,8 @@ function freshTab(): Tab {
 
 const initialTab = freshTab();
 
-// Not persisted: a relaunch restores the last active note only (slice 1).
+// Not persisted as such: only the open paths are, per workspace, through
+// `openTabsByWorkspace` below. Drafts and buffers never leave memory.
 export const tabsStore = store<TabsState>({
 	tabs: [initialTab],
 	activeTabId: initialTab.id,
@@ -241,6 +245,22 @@ export function activateTab(id: string): DocumentState | null {
 	return restored;
 }
 
+/**
+ * Whether a document's text can be written back to its file. Read-only notes
+ * (the changelog, images, PDFs) have no draft to save, and a conflicted note
+ * needs the user to resolve it before anything is written.
+ */
+export function isSavableDoc(doc: DocumentState): doc is DocumentState & {
+	currentPath: string;
+} {
+	return (
+		doc.currentPath !== null &&
+		!isChangelogPath(doc.currentPath) &&
+		isEditableFile(doc.currentPath) &&
+		doc.externalChange.kind !== "conflict"
+	);
+}
+
 /** What a tab advertises about its document beside the file name. */
 export type TabIndicator = "none" | "dirty" | "conflict";
 
@@ -254,9 +274,8 @@ export function documentIndicator(
 ): TabIndicator {
 	if (!document) return "none";
 	if (document.externalChange.kind === "conflict") return "conflict";
-	const path = document.currentPath;
-	// Read-only notes (the changelog, images, PDFs) have no draft to lose.
-	if (!path || isChangelogPath(path) || !isEditableFile(path)) return "none";
+	// Read-only notes have no draft to lose, so they never look dirty.
+	if (!isSavableDoc(document)) return "none";
 	return document.content === getBaseline(document) ? "none" : "dirty";
 }
 
@@ -342,3 +361,149 @@ export function resetTabs(): string {
 	tabsStore.set({ tabs: [tab], activeTabId: tab.id });
 	return tab.id;
 }
+
+/**
+ * Replaces the tab set with one tab per document, in order, showing the one at
+ * `activeIndex`. Used to rebuild a recorded tab set at startup or on a
+ * workspace switch; the caller owns the histories and the disk reads.
+ * Returns the new tab ids, in the same order as `documents`.
+ */
+export function installTabs(
+	documents: DocumentState[],
+	activeIndex: number,
+): string[] {
+	if (documents.length === 0) return [resetTabs()];
+	const index = Math.min(Math.max(activeIndex, 0), documents.length - 1);
+	const tabs = documents.map((document, position) => ({
+		id: createTabId(),
+		buffer: position === index ? null : document,
+	}));
+	tabsStore.set({ tabs, activeTabId: tabs[index].id });
+	viewerStore.set(documents[index]);
+	return tabs.map((tab) => tab.id);
+}
+
+// ── Per-workspace open tab sets ─────────────────────────────────────
+//
+// The open paths of the current workspace are mirrored into the persisted
+// `workspace.openTabsByWorkspace` so a relaunch, or a return to the workspace,
+// reopens the same notes. A subscription recomputes the record from the tabs
+// rather than each mutation reporting itself: renames, folder moves and
+// deletes already rewrite buffers and the active document, so a recompute
+// picks all of them up with no seam left to forget.
+
+/**
+ * The paths open right now, and which of them is on screen. A tab showing
+ * nothing to reopen (an empty tab, the changelog) leaves the record pointing at
+ * the first tab instead.
+ */
+function currentOpenTabsRecord(): OpenTabsRecord {
+	const state = tabsStore.get();
+	const paths: string[] = [];
+	let activeIndex = 0;
+	for (const tab of state.tabs) {
+		const isActive = tab.id === state.activeTabId;
+		const path = isActive
+			? viewerStore.get().currentPath
+			: (tab.buffer?.currentPath ?? null);
+		// Empty tabs and the virtual changelog are not files to reopen.
+		if (!path || isChangelogPath(path)) continue;
+		if (isActive) activeIndex = paths.length;
+		paths.push(path);
+	}
+	return { paths, activeIndex };
+}
+
+function sameRecord(a: OpenTabsRecord | undefined, b: OpenTabsRecord) {
+	return (
+		a !== undefined &&
+		a.activeIndex === b.activeIndex &&
+		a.paths.length === b.paths.length &&
+		a.paths.every((path, index) => path === b.paths[index])
+	);
+}
+
+// Recording starts off. Between module load and the app settling onto its
+// opening tab set, the tabs on screen are the app booting, not the user's
+// session: recording them would erase the very record startup restores from.
+let recordingSuppressed = true;
+
+/**
+ * Writes the current tab set into the active workspace's record. Loose files
+ * opened without a workspace are not recorded: `lastOpenedPath` already brings
+ * the single note back.
+ */
+export function recordOpenTabs() {
+	if (recordingSuppressed) return;
+	const workspacePath = workspaceStore.get().workspacePath;
+	if (!workspacePath) return;
+	const record = currentOpenTabsRecord();
+	workspaceStore.set((state) => {
+		if (state.workspacePath !== workspacePath) return state;
+		const existing = state.openTabsByWorkspace[workspacePath];
+		if (record.paths.length === 0) {
+			if (!existing) return state;
+			// No open notes is not a tab set worth restoring: forget it so the
+			// workspace falls back to its last opened note.
+			const { [workspacePath]: _dropped, ...rest } = state.openTabsByWorkspace;
+			return { ...state, openTabsByWorkspace: rest };
+		}
+		if (sameRecord(existing, record)) return state;
+		return {
+			...state,
+			openTabsByWorkspace: {
+				...state.openTabsByWorkspace,
+				[workspacePath]: record,
+			},
+		};
+	});
+}
+
+/**
+ * Declares the tabs on screen to be the user's session, and records them.
+ * Called once the app has settled onto its opening tab set, and again whenever
+ * a workspace switch has settled onto the next one.
+ */
+export function beginOpenTabsRecording() {
+	recordingSuppressed = false;
+	recordOpenTabs();
+}
+
+/**
+ * Runs a workspace transition with recording off. Tearing the tabs down and
+ * building the next workspace's back up passes through states that belong to
+ * neither workspace, and recording those would overwrite the record the
+ * transition is about to restore from.
+ */
+export async function withOpenTabsRecordingSuppressed<T>(
+	run: () => Promise<T>,
+): Promise<T> {
+	const wasSuppressed = recordingSuppressed;
+	recordingSuppressed = true;
+	try {
+		return await run();
+	} finally {
+		recordingSuppressed = wasSuppressed;
+	}
+}
+
+let recordScheduled = false;
+
+/**
+ * Records on a microtask so a multi-step change (stash a buffer, then swap the
+ * active document) is written once, and so the write happens outside the
+ * subscription that triggered it rather than inside the store's own graph.
+ */
+function scheduleRecordOpenTabs() {
+	if (recordScheduled) return;
+	recordScheduled = true;
+	queueMicrotask(() => {
+		recordScheduled = false;
+		recordOpenTabs();
+	});
+}
+
+// Both halves of a tab's identity move independently: the active note changes
+// in `viewerStore`, everything else in `tabsStore`.
+tabsStore.subscribe(scheduleRecordOpenTabs);
+currentPathStore.subscribe(scheduleRecordOpenTabs);

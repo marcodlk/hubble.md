@@ -63,6 +63,18 @@ export function pushHistory(path: string) {
 	setHistory({ entries, index: entries.length - 1 });
 }
 
+/**
+ * Starts a tab's stack at the note it was restored on. History itself is never
+ * persisted, so a reopened tab can navigate onwards from its note but cannot go
+ * back past it.
+ */
+export function seedTabHistory(tabId: string, path: string) {
+	historyStore.set((state) => ({
+		...state,
+		byTab: { ...state.byTab, [tabId]: { entries: [path], index: 0 } },
+	}));
+}
+
 /** Empties the active tab's stack. */
 export function clearHistory() {
 	setHistory({ entries: [], index: -1 });
