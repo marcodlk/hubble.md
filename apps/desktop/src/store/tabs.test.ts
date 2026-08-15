@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type MockDesktopApi = {
 	readFileText: ReturnType<typeof vi.fn>;
@@ -8,6 +8,9 @@ type MockDesktopApi = {
 	writeWorkspaceConfig: ReturnType<typeof vi.fn>;
 	renameFile: ReturnType<typeof vi.fn>;
 	deleteFile: ReturnType<typeof vi.fn>;
+	stageDelete: ReturnType<typeof vi.fn>;
+	restoreDelete: ReturnType<typeof vi.fn>;
+	finalizeDelete: ReturnType<typeof vi.fn>;
 	setDeleteUndoAvailable: ReturnType<typeof vi.fn>;
 	pathExists: ReturnType<typeof vi.fn>;
 	openPathFromLink: ReturnType<typeof vi.fn>;
@@ -25,6 +28,9 @@ function createDesktopApi(): MockDesktopApi {
 		writeWorkspaceConfig: vi.fn(async () => {}),
 		renameFile: vi.fn(async () => {}),
 		deleteFile: vi.fn(async () => {}),
+		stageDelete: vi.fn(async () => "delete-token"),
+		restoreDelete: vi.fn(async () => {}),
+		finalizeDelete: vi.fn(async () => {}),
 		setDeleteUndoAvailable: vi.fn(async () => {}),
 		pathExists: vi.fn(async () => true),
 		openPathFromLink: vi.fn(async () => ({ kind: "opened" })),
@@ -548,5 +554,277 @@ describe("desktop tabs", () => {
 		expect(
 			tabsStore.get().tabs.find((tab) => tab.id !== activeTabId)?.buffer,
 		).toMatchObject({ currentPath: "/workspace/a.md" });
+	});
+});
+
+/**
+ * Reads that used to mean "the only document" now mean "the document at this
+ * path", so a note parked on a background tab keeps saving, reloading, and
+ * following renames while another tab is on screen.
+ */
+describe("tab-aware document reads", () => {
+	beforeEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	/** Leaves `path` open on a background tab holding an unsaved draft. */
+	async function backgroundDraft(
+		store: Awaited<ReturnType<typeof loadStore>>,
+		disk: ReturnType<typeof withFakeDisk>,
+		path: string,
+		draft: string,
+	) {
+		await store.openPathInNewTab(path);
+		const tabId = store.tabsStore.get().activeTabId;
+		store.updateEditorContent(path, draft);
+		// The save on the way out fails, so the tab is backgrounded still dirty.
+		disk.failNextWrite();
+		await store.openPathInNewTab("/workspace/active.md");
+		return tabId;
+	}
+
+	function bufferOf(
+		store: Awaited<ReturnType<typeof loadStore>>,
+		tabId: string,
+	) {
+		return store.tabsStore.get().tabs.find((tab) => tab.id === tabId)?.buffer;
+	}
+
+	it("writes a background draft through the same preflight as the active note", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const store = await loadStore(api);
+		const tabId = await backgroundDraft(store, disk, "/workspace/a.md", "mine");
+		api.readFileText.mockClear();
+
+		await store.savePathContent("/workspace/a.md", "mine");
+
+		expect(api.readFileText).toHaveBeenCalledWith("/workspace/a.md");
+		expect(disk.read("/workspace/a.md")).toBe("mine");
+		expect(bufferOf(store, tabId)).toMatchObject({
+			currentPath: "/workspace/a.md",
+			content: "mine",
+			diskContent: "mine",
+			externalChange: { kind: "none" },
+		});
+	});
+
+	it("marks the background buffer and skips the write when disk moved on", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const store = await loadStore(api);
+		const tabId = await backgroundDraft(store, disk, "/workspace/a.md", "mine");
+		disk.write("/workspace/a.md", "theirs");
+		api.writeFileText.mockClear();
+
+		await store.savePathContent("/workspace/a.md", "mine");
+
+		expect(api.writeFileText).not.toHaveBeenCalled();
+		expect(disk.read("/workspace/a.md")).toBe("theirs");
+		expect(bufferOf(store, tabId)).toMatchObject({ content: "mine" });
+		expect(bufferOf(store, tabId)?.externalChange).toEqual({
+			kind: "conflict",
+			diskContent: "theirs",
+		});
+	});
+
+	it("does not treat Hubble's own late write as a background conflict", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const store = await loadStore(api);
+		const tabId = await backgroundDraft(store, disk, "/workspace/a.md", "mine");
+
+		await store.savePathContent("/workspace/a.md", "v1", { force: true });
+		await store.savePathContent("/workspace/a.md", "v2", { force: true });
+		// The watcher reports the earlier of the two writes out of order. Without
+		// self-save tracking that reads as someone else's text.
+		store.handleExternalFileChange("/workspace/a.md", "v1");
+
+		expect(bufferOf(store, tabId)).toMatchObject({
+			content: "mine",
+			diskContent: "v1",
+			externalChange: { kind: "none" },
+		});
+	});
+
+	it("reloads a clean background buffer and conflicts a dirty one", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const store = await loadStore(api);
+		await store.openPathInNewTab("/workspace/clean.md");
+		const cleanTabId = store.tabsStore.get().activeTabId;
+		const dirtyTabId = await backgroundDraft(
+			store,
+			disk,
+			"/workspace/dirty.md",
+			"mine",
+		);
+
+		store.handleExternalFileChange("/workspace/clean.md", "agent wrote this");
+		store.handleExternalFileChange("/workspace/dirty.md", "theirs");
+
+		expect(bufferOf(store, cleanTabId)).toMatchObject({
+			content: "agent wrote this",
+			diskContent: "agent wrote this",
+			externalChange: { kind: "none" },
+		});
+		expect(bufferOf(store, dirtyTabId)).toMatchObject({ content: "mine" });
+		expect(bufferOf(store, dirtyTabId)?.externalChange).toEqual({
+			kind: "conflict",
+			diskContent: "theirs",
+		});
+	});
+
+	it("rewrites a dirty background tab's links from its draft, not from disk", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const store = await loadStore(api);
+		store.appStore.set((current) => ({
+			...current,
+			workspace: {
+				...current.workspace,
+				workspacePath: "/workspace",
+				files: [{ path: "/workspace/docs/note.md", modified_at: 1 }],
+			},
+		}));
+		const tabId = await backgroundDraft(
+			store,
+			disk,
+			"/workspace/docs/note.md",
+			"draft body\n\n[link](../other.md)",
+		);
+		api.readFileText.mockClear();
+
+		await store.renameFolder("/workspace/docs", "docs", "/workspace/sub/docs");
+
+		const rewritten = "draft body\n\n[link](../../other.md)";
+		const movedPath = "/workspace/sub/docs/note.md";
+		expect(api.readFileText).not.toHaveBeenCalledWith(movedPath);
+		expect(disk.read(movedPath)).toBe(rewritten);
+		expect(bufferOf(store, tabId)).toMatchObject({
+			currentPath: movedPath,
+			content: rewritten,
+			diskContent: rewritten,
+		});
+	});
+
+	it("saves and follows a background tab through a file rename", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const store = await loadStore(api);
+		const tabId = await backgroundDraft(store, disk, "/workspace/a.md", "mine");
+
+		await store.renameMarkdownFile("/workspace/a.md", "renamed");
+
+		// The draft reached disk before the file moved.
+		expect(disk.read("/workspace/a.md")).toBe("mine");
+		expect(api.renameFile).toHaveBeenCalledWith(
+			"/workspace/a.md",
+			"/workspace/renamed.md",
+		);
+		expect(bufferOf(store, tabId)).toMatchObject({
+			currentPath: "/workspace/renamed.md",
+			content: "mine",
+		});
+		expect(store.historyStore.get().byTab[tabId].entries).toEqual([
+			"/workspace/renamed.md",
+		]);
+		// The rename never pulled the renamed note back into the active tab.
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/active.md");
+	});
+
+	it("closes a background tab whose file was deleted", async () => {
+		const api = createDesktopApi();
+		const disk = withFakeDisk(api);
+		const store = await loadStore(api);
+		const tabId = await backgroundDraft(store, disk, "/workspace/a.md", "mine");
+		api.writeFileText.mockClear();
+
+		await store.deleteMarkdownFile("/workspace/a.md");
+
+		expect(store.tabsStore.get().tabs).toHaveLength(1);
+		expect(store.tabsStore.get().tabs[0].id).not.toBe(tabId);
+		// The draft is dropped rather than written back over a deleted file.
+		expect(api.writeFileText).not.toHaveBeenCalled();
+		expect(store.historyStore.get().byTab[tabId]).toBeUndefined();
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/active.md");
+	});
+
+	it("closes every background tab under a deleted folder", async () => {
+		const api = createDesktopApi();
+		const store = await loadStore(api);
+		store.appStore.set((current) => ({
+			...current,
+			workspace: { ...current.workspace, workspacePath: "/workspace" },
+		}));
+		await store.openPathInNewTab("/workspace/docs/one.md");
+		await store.openPathInNewTab("/workspace/docs/two.md");
+		await store.openPathInNewTab("/workspace/keep.md");
+
+		await store.deleteSidebarItems([
+			{ kind: "folder", folderId: "/workspace/docs" },
+		]);
+
+		expect(store.tabsStore.get().tabs).toHaveLength(1);
+		expect(store.viewerStore.get().currentPath).toBe("/workspace/keep.md");
+	});
+});
+
+describe("tab-aware title generation", () => {
+	beforeEach(() => {
+		vi.unstubAllGlobals();
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("renames a note that was backgrounded before the debounce fired", async () => {
+		const api = createDesktopApi();
+		api.readFileText.mockResolvedValue("");
+		api.pathExists.mockImplementation(
+			async (path: string) => path === "/workspace/new-file.assets",
+		);
+		const {
+			appStore,
+			createMarkdownFileInFolder,
+			openPathInNewTab,
+			tabsStore,
+			updateEditorContent,
+			viewerStore,
+		} = await loadStore(api);
+		appStore.set((state) => ({
+			...state,
+			workspace: { ...state.workspace, workspacePath: "/workspace" },
+		}));
+
+		const path = (await createMarkdownFileInFolder("/workspace")) as string;
+		const noteTabId = tabsStore.get().activeTabId;
+		const markdown = "![Diagram](new-file.assets/diagram.png)\n# First Title";
+		updateEditorContent(path, markdown);
+		// The user switches tabs inside the rename debounce window.
+		await openPathInNewTab("/workspace/other.md");
+		api.writeFileText.mockClear();
+
+		await vi.advanceTimersByTimeAsync(500);
+
+		expect(api.renameFile).toHaveBeenCalledWith(
+			"/workspace/new-file.md",
+			"/workspace/first-title.md",
+		);
+		const renamedMarkdown =
+			"![Diagram](first-title.assets/diagram.png)\n# First Title";
+		expect(
+			tabsStore.get().tabs.find((tab) => tab.id === noteTabId)?.buffer,
+		).toMatchObject({
+			currentPath: "/workspace/first-title.md",
+			content: renamedMarkdown,
+		});
+		expect(api.writeFileText).toHaveBeenLastCalledWith(
+			"/workspace/first-title.md",
+			renamedMarkdown,
+		);
+		expect(viewerStore.get().currentPath).toBe("/workspace/other.md");
 	});
 });

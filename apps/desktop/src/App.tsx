@@ -94,7 +94,11 @@ import {
 	updateEditorContent,
 } from "./store/actions";
 import { canGoBack, canGoForward } from "./store/history";
-import { useHistoryNav } from "./store/hooks";
+import {
+	useHistoryNav,
+	useWatchedPathsKey,
+	WATCHED_PATH_SEPARATOR,
+} from "./store/hooks";
 import {
 	lastSeenVersionStore,
 	shortcutBindingsStore,
@@ -108,6 +112,7 @@ import {
 	workspacePathStore,
 	workspaceStore,
 } from "./store/state";
+import { isPathOpenInAnyTab } from "./store/tabs";
 import { isDarkTheme, subscribeTheme } from "./theme";
 
 // Forces editor refresh when underlying TipTap extensions change
@@ -346,51 +351,52 @@ function App() {
 		await desktopApi.checkForUpdates();
 	};
 
+	// Every open note is watched, not just the focused one, so a background tab
+	// reloads an agent's edit and marks a conflict against its own draft.
+	const watchedPathsKey = useWatchedPathsKey();
 	useEffect(() => {
-		const currentPath = state.currentPath;
-		// Only editable text files participate in external-change conflict handling.
-		if (
-			!currentPath ||
-			isChangelogPath(currentPath) ||
-			!isEditableFile(currentPath)
-		)
-			return;
+		if (!watchedPathsKey) return;
+		const watchedPaths = watchedPathsKey.split(WATCHED_PATH_SEPARATOR);
 
 		let disposed = false;
-		let unwatch: null | (() => void) = null;
+		const unwatchers: (() => void)[] = [];
 
-		const handleChange = async (paths: string[]) => {
-			if (!paths.includes(currentPath)) return;
-			if (getPendingRenameTarget(currentPath)) return;
+		const handleChange = async (watchedPath: string, paths: string[]) => {
+			if (!paths.includes(watchedPath)) return;
+			if (getPendingRenameTarget(watchedPath)) return;
 			try {
-				const nextContent = await desktopApi.readFileText(currentPath);
-				if (viewerStore.get().currentPath !== currentPath) return;
-				handleExternalFileChange(currentPath, nextContent);
+				const nextContent = await desktopApi.readFileText(watchedPath);
+				if (!isPathOpenInAnyTab(watchedPath)) return;
+				handleExternalFileChange(watchedPath, nextContent);
 			} catch {
-				if (viewerStore.get().currentPath !== currentPath) return;
-				await loadPath(currentPath, { launchExternal: false });
+				// Reopening only makes sense for the note on screen; a background
+				// tab keeps its buffer until the user switches to it.
+				if (viewerStore.get().currentPath === watchedPath) {
+					await loadPath(watchedPath, { launchExternal: false });
+				} else if (isPathOpenInAnyTab(watchedPath)) {
+					console.error(`Failed to read ${watchedPath} after a file change`);
+				}
 			}
 		};
 
-		const setup = async () => {
-			unwatch = await desktopApi.watchPath(
-				currentPath,
+		// One watcher per path, so a change to one note never re-reads the others.
+		const setup = async (watchedPath: string) => {
+			const unwatch = await desktopApi.watchPath(
+				watchedPath,
 				{ recursive: false },
-				(paths) => void handleChange(paths),
+				(paths) => void handleChange(watchedPath, paths),
 			);
-			if (disposed && unwatch) {
-				unwatch();
-			}
+			if (disposed) unwatch();
+			else unwatchers.push(unwatch);
 		};
 
-		void setup();
+		for (const watchedPath of watchedPaths) void setup(watchedPath);
 		return () => {
 			disposed = true;
-			if (unwatch) {
-				unwatch();
-			}
+			for (const unwatch of unwatchers) unwatch();
+			unwatchers.length = 0;
 		};
-	}, [state.currentPath]);
+	}, [watchedPathsKey]);
 
 	useEffect(() => {
 		const currentPath = state.currentPath;

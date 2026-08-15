@@ -12,9 +12,13 @@ import {
 	appStore,
 	type FileEntry,
 	titleGenerationPreviewStore,
-	viewerStore,
 	workspaceStore,
 } from "./state";
+import {
+	isPathOpenInAnyTab,
+	rewriteTabBufferPaths,
+	updateDocumentForPath,
+} from "./tabs";
 
 const TITLE_RENAME_DELAY_MS = 500;
 const existingPathErrorPattern = /\bEEXIST\b|\balready exists\b/i;
@@ -134,7 +138,9 @@ export function createTitleManager(deps: TitleManagerDeps) {
 
 	async function run(session: TitleSession) {
 		if (session.running || sessions.get(session.path) !== session) return;
-		if (viewerStore.get().currentPath !== session.path) {
+		// A session follows its note between tabs: backgrounding a note mid-debounce
+		// must not cancel the rename the user's heading already earned.
+		if (!isPathOpenInAnyTab(session.path)) {
 			stop(session.path);
 			return;
 		}
@@ -169,7 +175,7 @@ export function createTitleManager(deps: TitleManagerDeps) {
 		await deps.runFileTask(previousPath, async () => {
 			if (
 				sessions.get(previousPath) !== session ||
-				viewerStore.get().currentPath !== previousPath
+				!isPathOpenInAnyTab(previousPath)
 			) {
 				return;
 			}
@@ -180,7 +186,7 @@ export function createTitleManager(deps: TitleManagerDeps) {
 					session.markdown,
 					() =>
 						sessions.get(previousPath) === session &&
-						viewerStore.get().currentPath === previousPath,
+						isPathOpenInAnyTab(previousPath),
 				);
 				if (!retryPath) return;
 				renamedPath = retryPath;
@@ -278,6 +284,7 @@ export function createTitleManager(deps: TitleManagerDeps) {
 			previewPath: nextPath,
 		});
 		rewriteHistory(previousPath, nextPath);
+		rewriteTabBufferPaths(previousPath, nextPath);
 		appStore.set((state) => ({
 			...state,
 			workspace: {
@@ -316,27 +323,16 @@ export function createTitleManager(deps: TitleManagerDeps) {
 
 	function isLive(session: TitleSession) {
 		return (
-			sessions.get(session.path) === session &&
-			viewerStore.get().currentPath === session.path
+			sessions.get(session.path) === session && isPathOpenInAnyTab(session.path)
 		);
 	}
 
 	function updateContentIfLive(session: TitleSession, content: string) {
-		appStore.set((state) => {
-			if (
-				state.document.currentPath !== session.path ||
-				sessions.get(session.path) !== session
-			) {
-				return state;
-			}
-			return {
-				...state,
-				document: {
-					...state.document,
-					content,
-				},
-			};
-		});
+		if (sessions.get(session.path) !== session) return;
+		updateDocumentForPath(session.path, (document) => ({
+			...document,
+			content,
+		}));
 	}
 
 	return { currentPath, editorDocumentId, start, stop, update };

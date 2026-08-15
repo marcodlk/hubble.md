@@ -38,6 +38,8 @@ type DeleteDeps = {
 	) => Promise<void>;
 	syncPins: () => Promise<void>;
 	stopTitleRenames: (path: string) => void;
+	/** Closes background tabs showing deleted notes, without saving them. */
+	closeDeletedTabs: (isDeleted: (path: string) => boolean) => void;
 	handleError: (error: unknown) => string;
 };
 
@@ -220,6 +222,7 @@ export function createDeleteActions(deps: DeleteDeps) {
 				else pruneHistory(item.folderId, true);
 			}
 		}
+		deps.closeDeletedTabs(deletedPath);
 		appStore.set((state) => ({
 			...state,
 			workspace: {
@@ -307,6 +310,7 @@ export function createDeleteActions(deps: DeleteDeps) {
 				deps.stopTitleRenames(path);
 				clearHistory();
 			} else pruneHistory(path);
+			deps.closeDeletedTabs((openPath) => openPath === path);
 			appStore.set((state) => ({
 				...state,
 				workspace: {
@@ -352,6 +356,7 @@ export function createDeleteActions(deps: DeleteDeps) {
 			const currentPath = viewerStore.get().currentPath;
 			if (currentPath && pathInFolder(currentPath, path)) clearHistory();
 			else pruneHistory(path, true);
+			deps.closeDeletedTabs((openPath) => pathInFolder(openPath, path));
 			appStore.set((state) => ({
 				...state,
 				workspace: {

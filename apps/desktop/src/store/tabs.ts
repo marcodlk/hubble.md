@@ -1,5 +1,5 @@
 import { store } from "@simplestack/store";
-import { pathEquals } from "../lib/filePath";
+import { pathEquals, replacePathPrefix } from "../lib/filePath";
 import { type DocumentState, emptyDoc, viewerStore } from "./state";
 
 /**
@@ -71,6 +71,126 @@ export function tabForPath(path: string): string | null {
 	return null;
 }
 
+export function isPathOpenInAnyTab(path: string): boolean {
+	return tabForPath(path) !== null;
+}
+
+/**
+ * The document showing `path`, wherever it lives: the active slice when the
+ * focused tab holds it, otherwise the background tab's stash. Callers that
+ * work on "the note at this path" use this instead of reading `viewerStore`,
+ * so backgrounded notes stay first-class.
+ */
+export function getDocumentForPath(path: string): DocumentState | null {
+	const active = viewerStore.get();
+	if (active.currentPath && pathEquals(active.currentPath, path)) return active;
+	const state = tabsStore.get();
+	for (const tab of state.tabs) {
+		if (tab.id === state.activeTabId) continue;
+		const buffer = tab.buffer;
+		if (buffer?.currentPath && pathEquals(buffer.currentPath, path)) {
+			return buffer;
+		}
+	}
+	return null;
+}
+
+/**
+ * Rewrites whichever document shows `path`. The path is re-resolved at write
+ * time, so a tab switch during an in-flight save lands the result on the tab
+ * that now holds the note rather than on a stale slot.
+ */
+export function updateDocumentForPath(
+	path: string,
+	update: (document: DocumentState) => DocumentState,
+) {
+	const active = viewerStore.get();
+	if (active.currentPath && pathEquals(active.currentPath, path)) {
+		viewerStore.set((state) =>
+			state.currentPath && pathEquals(state.currentPath, path)
+				? update(state)
+				: state,
+		);
+		return;
+	}
+	tabsStore.set((state) => {
+		let changed = false;
+		const tabs = state.tabs.map((tab) => {
+			if (tab.id === state.activeTabId) return tab;
+			const buffer = tab.buffer;
+			if (!buffer?.currentPath || !pathEquals(buffer.currentPath, path)) {
+				return tab;
+			}
+			changed = true;
+			return { ...tab, buffer: update(buffer) };
+		});
+		return changed ? { ...state, tabs } : state;
+	});
+}
+
+/** Every open tab's document: the active slice plus each background stash. */
+export function openDocuments(): DocumentState[] {
+	const state = tabsStore.get();
+	return state.tabs.flatMap((tab) =>
+		tab.id === state.activeTabId
+			? [viewerStore.get()]
+			: tab.buffer
+				? [tab.buffer]
+				: [],
+	);
+}
+
+/** Every path open in a tab, in tab order. */
+export function openTabPaths(): string[] {
+	return openDocuments().flatMap((document) =>
+		document.currentPath ? [document.currentPath] : [],
+	);
+}
+
+/** Every background tab's path, in tab order. */
+export function backgroundTabPaths(state = tabsStore.get()): string[] {
+	return state.tabs.flatMap((tab) =>
+		tab.id !== state.activeTabId && tab.buffer?.currentPath
+			? [tab.buffer.currentPath]
+			: [],
+	);
+}
+
+/**
+ * Points background stashes at a note's new location after a rename or move,
+ * the way the active document's paths are rewritten in place. With `isFolder`,
+ * rewrites the prefix of every path inside the folder.
+ */
+export function rewriteTabBufferPaths(
+	fromPath: string,
+	toPath: string,
+	isFolder = false,
+) {
+	const rewrite = (path: string | null) => {
+		if (!path) return path;
+		if (isFolder) return replacePathPrefix(path, fromPath, toPath);
+		return pathEquals(path, fromPath) ? toPath : path;
+	};
+	tabsStore.set((state) => {
+		let changed = false;
+		const tabs = state.tabs.map((tab) => {
+			const buffer = tab.buffer;
+			if (tab.id === state.activeTabId || !buffer) return tab;
+			const currentPath = rewrite(buffer.currentPath);
+			const lastOpenedPath = rewrite(buffer.lastOpenedPath);
+			if (
+				currentPath === buffer.currentPath &&
+				lastOpenedPath === buffer.lastOpenedPath
+			) {
+				return tab;
+			}
+			changed = true;
+			return { ...tab, buffer: { ...buffer, currentPath, lastOpenedPath } };
+		});
+		return changed ? { ...state, tabs } : state;
+	});
+}
+
 /** Every background tab's stashed document, paired with its tab id. */
 export function backgroundBuffers(): { id: string; buffer: DocumentState }[] {
 	const state = tabsStore.get();
@@ -79,31 +199,6 @@ export function backgroundBuffers(): { id: string; buffer: DocumentState }[] {
 			? []
 			: [{ id: tab.id, buffer: tab.buffer }],
 	);
-}
-
-/**
- * Rewrites a background tab's stash, e.g. to record a disk conflict found
- * while saving it. Ignored once the tab is gone, active, or showing another
- * note, so a slow save can never resurrect stale state.
- */
-export function updateTabBuffer(
-	id: string,
-	path: string,
-	update: (buffer: DocumentState) => DocumentState,
-) {
-	tabsStore.set((state) => {
-		if (state.activeTabId === id) return state;
-		const target = state.tabs.find((tab) => tab.id === id);
-		if (!target?.buffer || target.buffer.currentPath !== path) return state;
-		return {
-			...state,
-			tabs: state.tabs.map((tab) =>
-				tab.id === id && tab.buffer
-					? { ...tab, buffer: update(tab.buffer) }
-					: tab,
-			),
-		};
-	});
 }
 
 /** Appends an empty tab without activating it. Returns its id. */

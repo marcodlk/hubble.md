@@ -97,11 +97,15 @@ import {
 	addTab,
 	backgroundBuffers,
 	documentForTab,
+	getDocumentForPath,
+	openDocuments,
+	openTabPaths,
 	removeTab,
 	resetTabs,
+	rewriteTabBufferPaths,
 	tabForPath,
 	tabsStore,
-	updateTabBuffer,
+	updateDocumentForPath,
 } from "./tabs";
 import { createTitleManager } from "./titleManagement";
 import { applyWorkspaceDelta } from "./workspaceDelta";
@@ -162,24 +166,32 @@ async function refreshFilesNow(
 		return { ...state, files: listing.files, folders: listing.folders };
 	});
 
-	const currentPath = viewerStore.get().currentPath;
-	if (
-		!options.reloadActive ||
-		workspaceStore.get().workspacePath !== path ||
-		!currentPath ||
-		isChangelogPath(currentPath) ||
-		!isEditableFile(currentPath) ||
-		!isInWorkspace(currentPath, path)
-	) {
+	if (!options.reloadActive || workspaceStore.get().workspacePath !== path) {
 		return;
 	}
-	try {
-		const nextContent = await desktopApi.readFileText(currentPath);
-		handleExternalFileChange(currentPath, nextContent);
-	} catch (err) {
-		toast.error("Failed to refresh active note", {
-			description: errorMessage(err),
-		});
+	// Every open note is stale after a refresh, not just the focused one, so a
+	// background tab shows the current file when the user switches to it.
+	const activePath = viewerStore.get().currentPath;
+	for (const openPath of openTabPaths()) {
+		if (
+			isChangelogPath(openPath) ||
+			!isEditableFile(openPath) ||
+			!isInWorkspace(openPath, path)
+		) {
+			continue;
+		}
+		try {
+			const nextContent = await desktopApi.readFileText(openPath);
+			handleExternalFileChange(openPath, nextContent);
+		} catch (err) {
+			if (openPath === activePath) {
+				toast.error("Failed to refresh active note", {
+					description: errorMessage(err),
+				});
+			} else {
+				console.error(`Failed to refresh ${openPath}:`, err);
+			}
+		}
 	}
 }
 
@@ -317,20 +329,38 @@ function moveAffectsPath(path: string, sourcePath: string, isFolder: boolean) {
 		: pathEquals(path, sourcePath);
 }
 
-function setViewerCleanContent(path: string, content: string) {
-	viewerStore.set((state) => {
-		if (state.currentPath !== path) return state;
-		return {
-			...state,
-			...cleanFileState(content),
-		};
-	});
+/** Open notes, in any tab, that a rename or move of `sourcePath` relocates. */
+function openDocumentsAffectedBy(sourcePath: string, isFolder: boolean) {
+	return openDocuments().filter(
+		(document) =>
+			document.currentPath &&
+			moveAffectsPath(document.currentPath, sourcePath, isFolder),
+	);
+}
+
+/**
+ * Flushes drafts to disk before the files under them move, so the move carries
+ * the user's latest text whether the note is focused or parked on a tab.
+ */
+async function saveOpenDocuments(documents: DocumentState[]) {
+	for (const document of documents) {
+		const path = document.currentPath;
+		if (!path || isChangelogPath(path) || !isEditableFile(path)) continue;
+		await savePathContent(path, document.content, { force: true });
+	}
+}
+
+function setDocumentCleanContent(path: string, content: string) {
+	updateDocumentForPath(path, (document) => ({
+		...document,
+		...cleanFileState(content),
+	}));
 }
 
 async function writeFileIfChanged(path: string, current: string, next: string) {
 	if (next === current) return false;
 	await desktopApi.writeFileText(path, next);
-	setViewerCleanContent(path, next);
+	setDocumentCleanContent(path, next);
 	return true;
 }
 
@@ -370,16 +400,15 @@ async function updateMovedLinks(movedFiles: MovedFile[], files: FileEntry[]) {
 	const workspacePath = workspaceStore.get().workspacePath;
 	if (!workspacePath || movedFiles.length === 0) return;
 	const movedByOldPath = indexMovedFiles(movedFiles);
-	const current = viewerStore.get();
 
 	for (const file of files.filter((file) => hasMarkdownExtension(file.path))) {
 		const nextPath = pathAfterMove(file.path, movedByOldPath);
 		try {
-			// The open editor may have unsaved changes, so disk content is stale for
+			// Any open tab may hold unsaved changes, so disk content is stale for
 			// that file. Rewrite from the draft and then save that rewritten draft.
-			const content = pathEquals(current.currentPath ?? "", nextPath)
-				? current.content
-				: await desktopApi.readFileText(nextPath);
+			const openDocument = getDocumentForPath(nextPath);
+			const content =
+				openDocument?.content ?? (await desktopApi.readFileText(nextPath));
 			const nextContent = rewriteMovedLinks({
 				content,
 				filePath: file.path,
@@ -819,6 +848,12 @@ export function setViewerMode(viewMode: ViewMode) {
 	});
 }
 
+/**
+ * Writes one note to disk, wherever that note is open. The document is looked
+ * up by path rather than read off the viewer, so a background tab's stash gets
+ * the same preflight, conflict handling and baseline bookkeeping as the focused
+ * one. Nothing happens when the path is no longer open in any tab.
+ */
 async function savePathContentNow(
 	path: string,
 	content: string,
@@ -828,9 +863,9 @@ async function savePathContentNow(
 	if (isChangelogPath(path) || !isEditableFile(path)) return;
 	// A save already queued by the editor must not recreate a staged deletion.
 	if (!options?.allowBlocked && deletionActions.isSaveBlocked(path)) return;
-	const current = viewerStore.get();
+	const current = getDocumentForPath(path);
 	const force = options?.force === true;
-	if (current.currentPath !== path) return;
+	if (!current) return;
 	if (!force && current.externalChange.kind === "conflict") return;
 	if (!force && current.content === content && content === getBaseline(current))
 		return;
@@ -838,16 +873,13 @@ async function savePathContentNow(
 	if (!force) {
 		try {
 			const currentDiskContent = await desktopApi.readFileText(path);
-			const nextCurrent = viewerStore.get();
-			if (nextCurrent.currentPath !== path) return;
+			const nextCurrent = getDocumentForPath(path);
+			if (!nextCurrent) return;
 			if (isSelfSave(path, currentDiskContent)) {
-				viewerStore.set((state) => {
-					if (state.currentPath !== path) return state;
-					return {
-						...state,
-						...selfSaveState(state.content, currentDiskContent),
-					};
-				});
+				updateDocumentForPath(path, (document) => ({
+					...document,
+					...selfSaveState(document.content, currentDiskContent),
+				}));
 			} else {
 				const action = classifyFileChange({
 					editorContent: nextCurrent.content,
@@ -855,10 +887,9 @@ async function savePathContentNow(
 					diskContent: currentDiskContent,
 				});
 				if (action !== "none") {
-					viewerStore.set((state) => {
-						if (state.currentPath !== path) return state;
-						return applyFileAction(state, currentDiskContent, action);
-					});
+					updateDocumentForPath(path, (document) =>
+						applyFileAction(document, currentDiskContent, action),
+					);
 					return;
 				}
 			}
@@ -872,20 +903,20 @@ async function savePathContentNow(
 		await desktopApi.writeFileText(path, content);
 		rememberSelfSave(path, content);
 		touchFile(path);
-		viewerStore.set((state) => {
-			if (state.currentPath !== path) return state;
-			if (!force && state.externalChange.kind === "conflict") return state;
+		updateDocumentForPath(path, (document) => {
+			if (!force && document.externalChange.kind === "conflict")
+				return document;
 			// Only write the saved text back into live editor content if the user
 			// has not typed more while the save was in flight. Otherwise, just
 			// move the saved baseline forward and keep the newer editor text.
-			if (state.content === content) {
+			if (document.content === content) {
 				return {
-					...state,
+					...document,
 					...cleanFileState(content),
 				};
 			}
 			return {
-				...state,
+				...document,
 				diskContent: content,
 				externalChange: { kind: "none" },
 				status: "ready",
@@ -895,14 +926,11 @@ async function savePathContentNow(
 	} catch (err) {
 		const message = handleFileError(err);
 		toast.error("Failed to save file", { description: message });
-		viewerStore.set((state) => {
-			if (state.currentPath !== path) return state;
-			return {
-				...state,
-				status: "error",
-				error: message,
-			};
-		});
+		updateDocumentForPath(path, (document) => ({
+			...document,
+			status: "error",
+			error: message,
+		}));
 		if (options?.throwOnError) throw err;
 	}
 }
@@ -933,6 +961,7 @@ const deletionActions = createDeleteActions({
 	loadPath,
 	syncPins: syncPinnedNotes,
 	stopTitleRenames: titleManager.stop,
+	closeDeletedTabs: closeDeletedBackgroundTabs,
 	handleError: handleFileError,
 });
 
@@ -949,8 +978,10 @@ export async function renameMarkdownFile(path: string, nextName: string) {
 	if (renameStem(nextName, currentExt) !== fileStem(path)) {
 		titleManager.stop(path);
 	}
-	const current = viewerStore.get();
-	const isCurrentFile = current.currentPath === path;
+	// The file may be open in a background tab, whose draft has to reach disk
+	// before the rename just like the focused one's.
+	const openDocument = getDocumentForPath(path);
+	const isCurrentFile = viewerStore.get().currentPath === path;
 	const { files: filesBeforeRename, workspacePath } = workspaceStore.get();
 
 	const trimmedName = nextName.trim();
@@ -968,14 +999,17 @@ export async function renameMarkdownFile(path: string, nextName: string) {
 	if (nextPath === path) return;
 
 	try {
-		if (isCurrentFile && isEditableFile(path)) {
-			await savePathContent(path, current.content, { force: true });
+		if (openDocument && isEditableFile(path)) {
+			await savePathContent(path, openDocument.content, { force: true });
 		}
 		pendingRenames.set(path, nextPath);
 		await desktopApi.renameFile(path, nextPath);
 		const movedAssetFolder = await moveAssociatedAssetFolder(path, nextPath);
 		const movedFiles = [{ fromPath: path, toPath: nextPath }];
 		if (movedAssetFolder) movedFiles.push(movedAssetFolder);
+		// Background stashes move before the link rewrite so a dirty one is
+		// rewritten from its draft rather than from the file it no longer matches.
+		rewriteTabBufferPaths(path, nextPath);
 		await updateMovedLinks(movedFiles, filesBeforeRename);
 		rewriteHistory(path, nextPath);
 		appStore.set((state) => ({
@@ -1090,9 +1124,7 @@ export async function renameFolder(
 	if (!isSafeRelativeRenamePath(trimmedName, nextPath, workspacePath)) return;
 	if (nextPath === path) return;
 
-	const current = viewerStore.get();
-	const currentPath = current.currentPath;
-	const currentAffected = currentPath && pathInFolder(currentPath, path);
+	const affectedDocuments = openDocumentsAffectedBy(path, true);
 	const movedFiles = movedMarkdownFiles(
 		filesBeforeRename,
 		path,
@@ -1101,12 +1133,11 @@ export async function renameFolder(
 	);
 
 	try {
-		if (currentAffected && currentPath && isEditableFile(currentPath)) {
-			await savePathContent(currentPath, current.content, { force: true });
-		}
+		await saveOpenDocuments(affectedDocuments);
 		await desktopApi.renameFile(path, nextPath);
 		await deleteEmptySourceAncestors(path, nextPath, workspacePath);
 		rewriteHistory(path, nextPath, true);
+		rewriteTabBufferPaths(path, nextPath, true);
 		appStore.set((state) => ({
 			...state,
 			workspace: {
@@ -1196,10 +1227,7 @@ export async function moveSidebarItem(
 	if (pathEquals(sourceParent, targetFolderPath)) return;
 	if (isFolder && pathStartsWithFolder(targetFolderPath, sourcePath)) return;
 
-	const current = viewerStore.get();
-	const currentPath = current.currentPath;
-	const currentAffected =
-		currentPath && moveAffectsPath(currentPath, sourcePath, isFolder);
+	const affectedDocuments = openDocumentsAffectedBy(sourcePath, isFolder);
 	const nextPath = uniqueMovePath(targetFolderPath, sourcePath, isFolder);
 	const movedFiles = movedMarkdownFiles(
 		filesBeforeMove,
@@ -1209,15 +1237,14 @@ export async function moveSidebarItem(
 	);
 
 	try {
-		if (currentAffected && currentPath && isEditableFile(currentPath)) {
-			await savePathContent(currentPath, current.content, { force: true });
-		}
+		await saveOpenDocuments(affectedDocuments);
 		await desktopApi.renameFile(sourcePath, nextPath);
 		const movedAssetFolder =
 			item.kind === "file"
 				? await moveAssociatedAssetFolder(sourcePath, nextPath)
 				: null;
 		rewriteHistory(sourcePath, nextPath, isFolder);
+		rewriteTabBufferPaths(sourcePath, nextPath, isFolder);
 		appStore.set((state) => ({
 			...state,
 			workspace: {
@@ -1332,20 +1359,19 @@ export function handleExternalFileChange(
 	path: string,
 	nextDiskContent: string,
 ) {
-	viewerStore.set((state) => {
-		if (state.currentPath !== path) return state;
+	updateDocumentForPath(path, (document) => {
 		if (isSelfSave(path, nextDiskContent)) {
 			return {
-				...state,
-				...selfSaveState(state.content, nextDiskContent),
+				...document,
+				...selfSaveState(document.content, nextDiskContent),
 			};
 		}
 		const action = classifyFileChange({
-			editorContent: state.content,
-			baseline: getBaseline(state),
+			editorContent: document.content,
+			baseline: getBaseline(document),
 			diskContent: nextDiskContent,
 		});
-		return applyFileAction(state, nextDiskContent, action);
+		return applyFileAction(document, nextDiskContent, action);
 	});
 }
 
@@ -1389,7 +1415,14 @@ const { run: loadInternalPath, invalidate: invalidateLoadPath } = takeLatest(
 			}
 			if (isStale()) return;
 			const currentPath = viewerStore.get().currentPath;
-			if (currentPath && !pathEquals(currentPath, path)) {
+			// Navigating inside a tab leaves the old note behind entirely, unless
+			// another tab owns it (which the one-tab-per-path invariant rules out).
+			const owner = currentPath ? tabForPath(currentPath) : null;
+			if (
+				currentPath &&
+				!pathEquals(currentPath, path) &&
+				(!owner || owner === tabsStore.get().activeTabId)
+			) {
 				titleManager.stop(currentPath);
 			}
 			appStore.set((state) => withOpenedDoc(state, path, content));
@@ -1595,28 +1628,17 @@ export async function openPathInNewTab(path: string) {
  * replaced by an empty one so the app lands on the open-file/welcome state.
  */
 export async function closeTab(id: string) {
-	const { activeTabId } = tabsStore.get();
 	const doc = documentForTab(id);
-	if (doc && isSavableDoc(doc) && doc.content !== getBaseline(doc)) {
-		if (id === activeTabId) {
-			// Best effort: a failed save still closes the tab in this slice.
-			await savePathContent(doc.currentPath, doc.content);
-		} else {
-			const result = await saveBackgroundBuffer(
-				id,
-				doc.currentPath,
-				doc.content,
-				getBaseline(doc),
-			);
-			// The note changed on disk behind the tab, so closing it would drop
-			// one of the two versions. Keep the tab open on its conflict instead.
-			// A failed write still closes, as before.
-			if (result === "conflict") {
-				toast.error("File changed on disk", {
-					description: `${basename(doc.currentPath)} has unsaved edits that conflict with a change on disk.`,
-				});
-				return;
-			}
+	if (doc && isSavableDoc(doc) && isDirty(doc)) {
+		await savePathContent(doc.currentPath, doc.content);
+		// The note changed on disk behind the tab, so closing it would drop one of
+		// the two versions. Keep the tab open on its conflict instead. A failed
+		// write still closes, as before.
+		if (hasDiskConflict(doc.currentPath)) {
+			toast.error("File changed on disk", {
+				description: `${basename(doc.currentPath)} has unsaved edits that conflict with a change on disk.`,
+			});
+			return;
 		}
 	}
 	const removal = removeTab(id);
@@ -1632,93 +1654,45 @@ function isDirty(doc: DocumentState) {
 }
 
 /**
+ * Closes the background tabs showing deleted notes. Their drafts are dropped
+ * unsaved: writing one back would recreate the file the user just deleted. The
+ * active document keeps its own delete handling, including the staged undo.
+ */
+function closeDeletedBackgroundTabs(isDeleted: (path: string) => boolean) {
+	for (const { id, buffer } of backgroundBuffers()) {
+		const path = buffer.currentPath;
+		if (!path || !isDeleted(path)) continue;
+		if (!removeTab(id)) continue;
+		dropTabHistory(id);
+		titleManager.stop(path);
+	}
+}
+
+/** Whether the note at `path` is holding a draft that diverged from disk. */
+function hasDiskConflict(path: string) {
+	return getDocumentForPath(path)?.externalChange.kind === "conflict";
+}
+
+/**
  * Flushes every tab's unsaved edits to disk, for callers that are about to
  * drop the tab set. Returns the path of the first draft that could not be
  * saved because the file changed underneath it, or `null` when everything
  * dirty is safely on disk.
  */
 async function saveAllTabs(): Promise<string | null> {
-	const current = viewerStore.get();
-	if (isSavableDoc(current) && isDirty(current)) {
-		await savePathContent(current.currentPath, current.content);
-	}
 	let blocked: string | null = null;
-	for (const { id, buffer } of backgroundBuffers()) {
-		if (!buffer.currentPath || !isDirty(buffer)) continue;
-		if (!isSavableDoc(buffer)) {
+	for (const doc of openDocuments()) {
+		const path = doc.currentPath;
+		if (!path || !isDirty(doc)) continue;
+		if (!isSavableDoc(doc)) {
 			// Already conflicted: its draft is only recoverable from the tab.
-			if (isEditableFile(buffer.currentPath)) blocked ??= buffer.currentPath;
+			if (!isChangelogPath(path) && isEditableFile(path)) blocked ??= path;
 			continue;
 		}
-		const result = await saveBackgroundBuffer(
-			id,
-			buffer.currentPath,
-			buffer.content,
-			getBaseline(buffer),
-		);
-		if (result === "conflict") blocked ??= buffer.currentPath;
+		await savePathContent(path, doc.content);
+		if (hasDiskConflict(path)) blocked ??= path;
 	}
 	return blocked;
-}
-
-/**
- * Writes a background tab's draft. `savePathContent` only ever writes the
- * active document, so a stashed buffer takes its own write path while still
- * queueing behind that file's other saves.
- *
- * Nothing watches a backgrounded note yet (slice 2), so the disk preflight
- * `savePathContentNow` runs is the only thing standing between a stale stash
- * and someone else's newer text. A divergence is recorded on the buffer as a
- * conflict for the user to resolve on that tab.
- */
-async function saveBackgroundBuffer(
-	tabId: string,
-	path: string,
-	content: string,
-	baseline: string,
-): Promise<"saved" | "conflict" | "error"> {
-	let outcome: "saved" | "conflict" | "error" = "saved";
-	await saves.run(path, async () => {
-		let diskContent: string | null = null;
-		try {
-			diskContent = await desktopApi.readFileText(path);
-		} catch {
-			// Unreadable during preflight: fall through to the write, the same way
-			// the active document's save does.
-		}
-		if (diskContent !== null && !isSelfSave(path, diskContent)) {
-			const action = classifyFileChange({
-				editorContent: content,
-				baseline,
-				diskContent,
-			});
-			// "reload" cannot happen: a clean buffer is never saved.
-			if (action === "conflict") {
-				const disk = diskContent;
-				updateTabBuffer(tabId, path, (buffer) =>
-					applyFileAction(buffer, disk, "conflict"),
-				);
-				outcome = "conflict";
-				return;
-			}
-			if (action === "match") return;
-		}
-		try {
-			rememberSelfSave(path, content);
-			await desktopApi.writeFileText(path, content);
-			rememberSelfSave(path, content);
-			touchFile(path);
-			updateTabBuffer(tabId, path, (buffer) =>
-				buffer.content === content
-					? { ...buffer, ...cleanFileState(content) }
-					: { ...buffer, diskContent: content },
-			);
-		} catch (err) {
-			outcome = "error";
-			toast.error("Failed to save file", { description: handleFileError(err) });
-		}
-	});
-	return outcome;
 }
 
 async function navigateHistory(delta: -1 | 1) {
