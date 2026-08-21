@@ -15,7 +15,7 @@ Decision: mermaid diagrams render **in-realm**, in the editor's own document, co
 The in-realm choice puts the burden on the render path, so it is hardened rather than trusted:
 
 - `securityLevel: "strict"` and `htmlLabels: false` (including `flowchart.htmlLabels`), so labels are SVG text rather than injected HTML.
-- An extended `secure` config allowlist that freezes the security-relevant keys — a `%%{init}%%` directive inside diagram text cannot re-open `securityLevel`, `htmlLabels`, or theme/CSS injection.
+- An extended `secure` config denylist that freezes the security-relevant keys at every nesting depth, so a `%%{init}%%` directive inside diagram text cannot re-open `securityLevel` or `htmlLabels`, nor reach `theme`, `themeVariables`, and `themeCSS`.
 - A second DOMPurify pass over mermaid's SVG output, with `foreignObject` and `script` forbidden, before the single `innerHTML` site in the node view. Mermaid sanitizes its own input; Hubble does not depend on that.
 - Renders are serialized through one queue, because mermaid's config and id counter are module-global.
 - An exact version pin (`mermaid` 11.17.0) rather than a range, so a mermaid release cannot change the sanitization surface without an explicit bump.
