@@ -12,6 +12,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com).
 - Notes open in tabs: opening a file from the picker, Finder, or `open -a Hubble` keeps the current note in its own tab. Each tab has its own back/forward history and unsaved-changes indicator, switch with Ctrl+Tab or Cmd+1–9, close with Cmd+W, and each workspace reopens the tabs it was left on. [#240](https://github.com/bholmesdev/hubble.md/issues/240)
 - HTML Apps can send a note to its own tab with `hubble.files.open(path, { newTab: true })`, keeping the app's tab open. Without the option, `hubble.files.open(path)` still replaces the note on screen.
 - HTML Apps can open external links in the system browser with `hubble.links.open(url)`. [#263](https://github.com/bholmesdev/hubble.md/pull/263)
+- Fenced `mermaid` code blocks render as diagrams. Click a diagram to edit its source, click away to re-render. Diagrams follow the app theme, support zoom, pan, and height resize, and invalid diagram text shows an inline error without touching the note's markdown.
 
 ### Changed
 
