@@ -137,7 +137,9 @@ function CodeBlockView({
 			const pos = getPos();
 			if (pos === undefined) return false;
 			const { from, to } = current.state.selection;
-			return from <= pos + node.nodeSize && to >= pos;
+			// Containment rather than overlap: a selection that merely spans the
+			// block, such as select-all, must not flip every diagram to source.
+			return from >= pos && to <= pos + node.nodeSize;
 		},
 	});
 
@@ -233,7 +235,7 @@ function CodeBlockView({
 }
 
 type MermaidState = {
-	status: "idle" | "loading" | "ready" | "error";
+	status: "idle" | "loading" | "ready" | "error" | "empty";
 	svg?: string;
 	message?: string;
 };
@@ -246,11 +248,19 @@ function MermaidDiagramSection({
 }: Pick<NodeViewProps, "editor" | "node" | "getPos"> & { active: boolean }) {
 	const source = node.textContent;
 	const dark = useSyncExternalStore(subscribeDarkMode, isDarkMode, () => false);
+	const editable = useEditorState({
+		editor,
+		selector: ({ editor: current }) => current.isEditable,
+	});
 	const [state, setState] = useState<MermaidState>({ status: "idle" });
 	const containerRef = useRef<HTMLButtonElement | null>(null);
 
 	useEffect(() => {
-		if (active || source.trim().length === 0) return;
+		if (active) return;
+		if (source.trim().length === 0) {
+			setState({ status: "empty" });
+			return;
+		}
 		let cancelled = false;
 		setState((previous) => ({ ...previous, status: "loading" }));
 		const timer = setTimeout(() => {
@@ -290,7 +300,9 @@ function MermaidDiagramSection({
 						<code>{state.message}</code>
 					</div>
 				) : (
-					<div className="pm-mermaid-placeholder">Rendering diagram…</div>
+					<div className="pm-mermaid-placeholder">
+						{state.status === "empty" ? "Empty diagram" : "Rendering diagram…"}
+					</div>
 				)}
 			</div>
 		);
@@ -302,13 +314,17 @@ function MermaidDiagramSection({
 				type="button"
 				className="pm-mermaid-diagram"
 				aria-label="Edit mermaid source"
+				// A read-only editor has no source to move the caret into, so the
+				// diagram must not sit in the tab order offering an inert control.
+				disabled={!editable}
 				ref={containerRef}
 				onClick={() => {
-					if (!editor.isEditable) return;
+					const pos = getPos();
+					if (pos === undefined) return;
 					editor
 						.chain()
 						.focus()
-						.setTextSelection((getPos() ?? 0) + 1)
+						.setTextSelection(pos + 1)
 						.run();
 				}}
 			/>

@@ -765,10 +765,6 @@
 	text-align: start;
 }
 
-[data-hubble-editor] .pm-code-block[data-mermaid] {
-	position: relative;
-}
-
 /* Collapse the source instead of unmounting or `display: none`-ing it, so
  * ProseMirror's contentDOM stays focusable when a click moves the caret in. */
 [data-hubble-editor]
@@ -805,9 +801,13 @@
 	cursor: text;
 }
 
+[data-hubble-editor] .pm-mermaid-diagram:disabled {
+	cursor: default;
+}
+
 [data-hubble-editor] .pm-mermaid-diagram svg {
 	max-inline-size: 100%;
-	height: auto;
+	block-size: auto;
 }
 
 [data-hubble-editor] .pm-mermaid-placeholder {
