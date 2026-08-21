@@ -14,6 +14,18 @@ describe("code block markdown conversion", () => {
 		expect(tiptapDocToMarkdown(doc)).toBe("```ts\nconst x: number = 1;\n```");
 	});
 
+	it("preserves mermaid fences verbatim", () => {
+		const markdown = "```mermaid\ngraph TD;\n  A-->B;\n```";
+		const doc = markdownToTiptapDoc(markdown);
+
+		expect(doc.content?.[0]).toEqual({
+			type: "codeBlock",
+			attrs: { language: "mermaid" },
+			content: [{ type: "text", text: "graph TD;\n  A-->B;" }],
+		});
+		expect(tiptapDocToMarkdown(doc)).toBe(markdown);
+	});
+
 	it("keeps bare fenced code blocks bare", () => {
 		const doc = markdownToTiptapDoc("```\nplain\n```");
 

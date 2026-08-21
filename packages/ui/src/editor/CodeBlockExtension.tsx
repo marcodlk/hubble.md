@@ -6,14 +6,19 @@ import {
 	type NodeViewProps,
 	NodeViewWrapper,
 	ReactNodeViewRenderer,
+	useEditorState,
 } from "@tiptap/react";
 import { common, createLowlight } from "lowlight";
-import { useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import MingcuteCheckLine from "~icons/mingcute/check-line";
 import MingcuteCopy2Line from "~icons/mingcute/copy-2-line";
 import { Button } from "../primitives/button";
+import { isDarkMode, subscribeDarkMode } from "./darkMode";
+import { renderMermaidDiagram } from "./mermaidRenderer";
 
 const DEFAULT_TAB_SIZE = 4;
+const MERMAID_LANGUAGE = "mermaid";
+const MERMAID_DEBOUNCE_MS = 150;
 const TWO_SPACE_LANGUAGES = new Set([
 	"css",
 	"html",
@@ -113,13 +118,36 @@ export const HubbleCodeBlock = CodeBlockLowlight.extend({
 	tabSize: DEFAULT_TAB_SIZE,
 });
 
-function CodeBlockView({ node, updateAttributes }: NodeViewProps) {
+function CodeBlockView({
+	editor,
+	node,
+	getPos,
+	updateAttributes,
+}: NodeViewProps) {
 	const language =
 		typeof node.attrs.language === "string" ? node.attrs.language : "";
 	const [selectOpen, setSelectOpen] = useState(false);
+	// Mermaid blocks swap the source for a diagram whenever the selection sits
+	// elsewhere, so the wrapper needs the active flag alongside the marker.
+	const isMermaid = language === MERMAID_LANGUAGE;
+	const active = useEditorState({
+		editor,
+		selector: ({ editor: current }) => {
+			if (!isMermaid) return false;
+			const pos = getPos();
+			if (pos === undefined) return false;
+			const { from, to } = current.state.selection;
+			return from <= pos + node.nodeSize && to >= pos;
+		},
+	});
 
 	return (
-		<NodeViewWrapper className="pm-code-block" as="div">
+		<NodeViewWrapper
+			className="pm-code-block"
+			as="div"
+			data-mermaid={isMermaid ? "true" : undefined}
+			data-mermaid-active={isMermaid && active ? "true" : undefined}
+		>
 			<div
 				className="pm-code-block-controls"
 				contentEditable={false}
@@ -192,7 +220,102 @@ function CodeBlockView({ node, updateAttributes }: NodeViewProps) {
 					style={{ whiteSpace: "inherit" }}
 				/>
 			</pre>
+			{isMermaid ? (
+				<MermaidDiagramSection
+					editor={editor}
+					node={node}
+					getPos={getPos}
+					active={active}
+				/>
+			) : null}
 		</NodeViewWrapper>
+	);
+}
+
+type MermaidState = {
+	status: "idle" | "loading" | "ready" | "error";
+	svg?: string;
+	message?: string;
+};
+
+function MermaidDiagramSection({
+	editor,
+	node,
+	getPos,
+	active,
+}: Pick<NodeViewProps, "editor" | "node" | "getPos"> & { active: boolean }) {
+	const source = node.textContent;
+	const dark = useSyncExternalStore(subscribeDarkMode, isDarkMode, () => false);
+	const [state, setState] = useState<MermaidState>({ status: "idle" });
+	const containerRef = useRef<HTMLButtonElement | null>(null);
+
+	useEffect(() => {
+		if (active || source.trim().length === 0) return;
+		let cancelled = false;
+		setState((previous) => ({ ...previous, status: "loading" }));
+		const timer = setTimeout(() => {
+			void renderMermaidDiagram(source, dark).then((result) => {
+				if (cancelled) return;
+				setState((previous) =>
+					result.ok
+						? { status: "ready", svg: result.svg }
+						: {
+								status: "error",
+								svg: previous.svg,
+								message: result.message,
+							},
+				);
+			});
+		}, MERMAID_DEBOUNCE_MS);
+		return () => {
+			cancelled = true;
+			clearTimeout(timer);
+		};
+	}, [source, dark, active]);
+
+	useEffect(() => {
+		const container = containerRef.current;
+		if (!container) return;
+		// The renderer sanitizes mermaid's output, so this stays the one place the
+		// editor trusts a string as markup.
+		container.innerHTML = state.svg ?? "";
+	}, [state.svg]);
+
+	if (state.svg === undefined) {
+		return (
+			<div className="pm-mermaid-section" contentEditable={false}>
+				{state.status === "error" ? (
+					<div className="pm-mermaid-error">
+						<span>Mermaid diagram error</span>
+						<code>{state.message}</code>
+					</div>
+				) : (
+					<div className="pm-mermaid-placeholder">Rendering diagram…</div>
+				)}
+			</div>
+		);
+	}
+
+	return (
+		<div className="pm-mermaid-section" contentEditable={false}>
+			<button
+				type="button"
+				className="pm-mermaid-diagram"
+				aria-label="Edit mermaid source"
+				ref={containerRef}
+				onClick={() => {
+					if (!editor.isEditable) return;
+					editor
+						.chain()
+						.focus()
+						.setTextSelection((getPos() ?? 0) + 1)
+						.run();
+				}}
+			/>
+			{state.status === "error" ? (
+				<span className="pm-mermaid-stale-badge">syntax error</span>
+			) : null}
+		</div>
 	);
 }
 
@@ -238,4 +361,5 @@ const codeBlockLanguages = [
 	{ value: "python", label: "Python" },
 	{ value: "rust", label: "Rust" },
 	{ value: "go", label: "Go" },
+	{ value: "mermaid", label: "Mermaid" },
 ] as const;

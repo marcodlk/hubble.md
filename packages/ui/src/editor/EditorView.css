@@ -764,3 +764,90 @@
 	font-weight: 600;
 	text-align: start;
 }
+
+[data-hubble-editor] .pm-code-block[data-mermaid] {
+	position: relative;
+}
+
+/* Collapse the source instead of unmounting or `display: none`-ing it, so
+ * ProseMirror's contentDOM stays focusable when a click moves the caret in. */
+[data-hubble-editor]
+	.pm-code-block[data-mermaid]:not([data-mermaid-active="true"])
+	pre {
+	block-size: 0;
+	margin-block: 0;
+	padding: 0;
+	overflow: hidden;
+	opacity: 0;
+	pointer-events: none;
+}
+
+[data-hubble-editor]
+	.pm-code-block[data-mermaid][data-mermaid-active="true"]
+	.pm-mermaid-section {
+	display: none;
+}
+
+[data-hubble-editor] .pm-mermaid-section {
+	position: relative;
+}
+
+[data-hubble-editor] .pm-mermaid-diagram {
+	display: flex;
+	inline-size: 100%;
+	justify-content: center;
+	overflow-x: auto;
+	appearance: none;
+	border: 0;
+	border-radius: var(--radius);
+	padding: 1rem;
+	background-color: var(--muted);
+	cursor: text;
+}
+
+[data-hubble-editor] .pm-mermaid-diagram svg {
+	max-inline-size: 100%;
+	height: auto;
+}
+
+[data-hubble-editor] .pm-mermaid-placeholder {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-block-size: 120px;
+	border-radius: var(--radius);
+	background-color: var(--muted);
+	color: var(--muted-foreground);
+	font-size: 0.8125rem;
+}
+
+[data-hubble-editor] .pm-mermaid-error {
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+	min-block-size: 120px;
+	border: 1px solid var(--destructive);
+	border-radius: var(--radius);
+	padding: 1rem;
+	background-color: var(--muted);
+	color: var(--destructive);
+	font-size: 0.8125rem;
+}
+
+[data-hubble-editor] .pm-mermaid-error code {
+	white-space: pre-wrap;
+	font-family: var(--font-mono);
+	font-size: 0.75rem;
+}
+
+[data-hubble-editor] .pm-mermaid-stale-badge {
+	position: absolute;
+	inset-block-start: 0.45rem;
+	inset-inline-start: 0.45rem;
+	border-radius: var(--radius-inner);
+	padding: 0.1rem 0.35rem;
+	background-color: var(--destructive);
+	color: var(--background);
+	font-size: 0.6875rem;
+	line-height: 1.2;
+}
