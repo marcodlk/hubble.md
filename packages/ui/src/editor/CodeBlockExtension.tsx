@@ -355,7 +355,7 @@ function MermaidDiagramSection({
 			// A trackpad pinch reaches the page as a ctrl-modified wheel event.
 			if (!event.ctrlKey && !event.metaKey) return;
 			event.preventDefault();
-			const from = zoom ?? 1;
+			const from = displayedScale(canvasRef.current, natural, zoom);
 			const next = clampZoom(
 				from * (event.deltaY < 0 ? MERMAID_ZOOM_STEP : 1 / MERMAID_ZOOM_STEP),
 			);
@@ -410,6 +410,10 @@ function MermaidDiagramSection({
 
 		const onClickCapture = (event: MouseEvent) => {
 			if (!suppressClick) return;
+			// A pan that ends outside the viewport, or in a `pointercancel`, leaves
+			// no click to swallow. Keyboard and programmatic activations carry no
+			// click count, so they must never be the ones that clear the flag.
+			if (event.detail === 0) return;
 			suppressClick = false;
 			event.preventDefault();
 			event.stopPropagation();
@@ -429,7 +433,7 @@ function MermaidDiagramSection({
 			window.removeEventListener("pointerup", onPointerUp);
 			window.removeEventListener("pointercancel", onPointerUp);
 		};
-	}, [zoom, viewportReady]);
+	}, [zoom, natural, viewportReady]);
 
 	if (state.svg === undefined) {
 		return (
@@ -515,7 +519,14 @@ function MermaidDiagramSection({
 					aria-label="Zoom out diagram"
 					title="Zoom out"
 					className="size-4"
-					onClick={() => setZoom(clampZoom(scale / MERMAID_ZOOM_STEP))}
+					onClick={() =>
+						setZoom(
+							clampZoom(
+								displayedScale(canvasRef.current, natural, zoom) /
+									MERMAID_ZOOM_STEP,
+							),
+						)
+					}
 				>
 					<MingcuteZoomOutLine className="size-3.5" />
 				</Button>
@@ -537,7 +548,14 @@ function MermaidDiagramSection({
 					aria-label="Zoom in diagram"
 					title="Zoom in"
 					className="size-4"
-					onClick={() => setZoom(clampZoom(scale * MERMAID_ZOOM_STEP))}
+					onClick={() =>
+						setZoom(
+							clampZoom(
+								displayedScale(canvasRef.current, natural, zoom) *
+									MERMAID_ZOOM_STEP,
+							),
+						)
+					}
 				>
 					<MingcuteZoomInLine className="size-3.5" />
 				</Button>
@@ -600,6 +618,23 @@ function MermaidDiagramSection({
 			) : null}
 		</div>
 	);
+}
+
+/**
+ * The scale the diagram is drawn at right now. Fit mode has no transform: the
+ * svg is capped at the viewport width, so a step has to start from the scale
+ * the reader sees or "zoom out" would grow a diagram that was scaled down.
+ */
+function displayedScale(
+	canvas: HTMLElement | null,
+	natural: NaturalSize | null,
+	zoom: number | null,
+) {
+	if (zoom !== null) return zoom;
+	if (!natural) return 1;
+	const width = canvas?.querySelector("svg")?.getBoundingClientRect().width;
+	if (!width || width <= 0) return 1;
+	return width / natural.width;
 }
 
 function clampZoom(value: number) {

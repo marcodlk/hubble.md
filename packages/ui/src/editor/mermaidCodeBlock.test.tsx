@@ -274,6 +274,22 @@ describe("mermaid code block node view", () => {
 		expect(sizer?.style.width).toBe("");
 	});
 
+	it("steps out from the scale a fitted diagram is drawn at", async () => {
+		const { container } = await mountEditor("mermaid");
+		const svg = container.querySelector<SVGElement>(".pm-mermaid-canvas svg");
+		// A 400-wide diagram fitted into a 200-wide viewport draws at 50%.
+		if (svg) {
+			svg.getBoundingClientRect = () =>
+				({ width: 200, height: 100 }) as DOMRect;
+		}
+
+		await act(async () => {
+			control(container, "Zoom out diagram")?.click();
+		});
+
+		expect(label(container)?.textContent).toBe("40%");
+	});
+
 	it("pans without opening the source once the drag passes the threshold", async () => {
 		const { container, editor } = await mountEditor("mermaid");
 		const viewport = container.querySelector<HTMLElement>(
@@ -287,7 +303,7 @@ describe("mermaid code block node view", () => {
 			viewport?.dispatchEvent(pointerEvent("pointerdown", 100, 100));
 			window.dispatchEvent(pointerEvent("pointermove", 140, 130));
 			window.dispatchEvent(pointerEvent("pointerup", 140, 130));
-			diagram?.click();
+			diagram?.dispatchEvent(pointerEvent("click", 140, 130));
 		});
 		expect(editor.state.selection.from).toBe(1);
 
@@ -295,8 +311,30 @@ describe("mermaid code block node view", () => {
 			viewport?.dispatchEvent(pointerEvent("pointerdown", 100, 100));
 			window.dispatchEvent(pointerEvent("pointermove", 101, 101));
 			window.dispatchEvent(pointerEvent("pointerup", 101, 101));
-			diagram?.click();
+			diagram?.dispatchEvent(pointerEvent("click", 101, 101));
 		});
+		expect(editor.state.selection.from).toBe(codeBlockRange(editor).from + 1);
+	});
+
+	it("still opens the source from the keyboard after a cancelled pan", async () => {
+		const { container, editor } = await mountEditor("mermaid");
+		const viewport = container.querySelector<HTMLElement>(
+			".pm-mermaid-viewport",
+		);
+
+		// A cancelled pan leaves no click behind, so the swallower stays armed.
+		await act(async () => {
+			viewport?.dispatchEvent(pointerEvent("pointerdown", 100, 100));
+			window.dispatchEvent(pointerEvent("pointermove", 140, 130));
+			window.dispatchEvent(pointerEvent("pointercancel", 140, 130));
+		});
+		await act(async () => {
+			// Enter on the focused button dispatches a click with no click count.
+			container
+				.querySelector<HTMLButtonElement>(".pm-mermaid-diagram")
+				?.click();
+		});
+
 		expect(editor.state.selection.from).toBe(codeBlockRange(editor).from + 1);
 	});
 
@@ -433,7 +471,13 @@ function label(container: HTMLElement) {
 
 /** happy-dom has no PointerEvent, and the node view only reads mouse fields. */
 function pointerEvent(type: string, clientX: number, clientY: number) {
-	return new MouseEvent(type, { bubbles: true, clientX, clientY, button: 0 });
+	return new MouseEvent(type, {
+		bubbles: true,
+		clientX,
+		clientY,
+		button: 0,
+		detail: 1,
+	});
 }
 
 function selectInsideCodeBlock(editor: Editor) {

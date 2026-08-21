@@ -821,6 +821,9 @@
 [data-hubble-editor]:not([data-hubble-source-editor])
 	.pm-mermaid-diagram:disabled {
 	cursor: default;
+	/* A disabled control swallows pointer events instead of bubbling them, which
+	 * would leave a read-only diagram unable to pan. */
+	pointer-events: none;
 }
 
 [data-hubble-editor]:not([data-hubble-source-editor]) .pm-mermaid-sizer {
