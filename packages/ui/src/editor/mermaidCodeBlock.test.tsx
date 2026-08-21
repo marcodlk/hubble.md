@@ -35,7 +35,7 @@ const editors: Editor[] = [];
 
 beforeEach(() => {
 	vi.useFakeTimers();
-	renderMock.mockReset().mockResolvedValue({ ok: true, svg: "<svg />" });
+	renderMock.mockReset().mockResolvedValue({ ok: true, svg: MERMAID_SVG });
 });
 
 afterEach(() => {
@@ -240,6 +240,94 @@ describe("mermaid code block node view", () => {
 		expect(container.querySelector(".pm-mermaid-diagram")).not.toBeNull();
 	});
 
+	it("renders the first diagram without waiting out the debounce", async () => {
+		const { container } = await mountEditor("mermaid", { settle: false });
+
+		expect(renderMock).toHaveBeenCalledTimes(1);
+		expect(container.querySelector(".pm-mermaid-diagram")).not.toBeNull();
+	});
+
+	it("zooms the canvas in steps and back to fit", async () => {
+		const { container } = await mountEditor("mermaid");
+		const sizer = container.querySelector<HTMLElement>(".pm-mermaid-sizer");
+		const canvas = container.querySelector<HTMLElement>(".pm-mermaid-canvas");
+		expect(label(container)?.textContent).toBe("Fit");
+		expect(canvas?.style.transform).toBe("");
+
+		await act(async () => {
+			control(container, "Zoom in diagram")?.click();
+		});
+
+		expect(label(container)?.textContent).toBe("125%");
+		expect(canvas?.style.transform).toBe("scale(1.25)");
+		// Natural size comes from the viewBox, since happy-dom has no layout.
+		expect(canvas?.style.width).toBe("400px");
+		expect(sizer?.style.width).toBe("500px");
+		expect(sizer?.style.height).toBe("250px");
+
+		await act(async () => {
+			control(container, "Reset diagram zoom")?.click();
+		});
+
+		expect(label(container)?.textContent).toBe("Fit");
+		expect(canvas?.style.transform).toBe("");
+		expect(sizer?.style.width).toBe("");
+	});
+
+	it("pans without opening the source once the drag passes the threshold", async () => {
+		const { container, editor } = await mountEditor("mermaid");
+		const viewport = container.querySelector<HTMLElement>(
+			".pm-mermaid-viewport",
+		);
+		const diagram = container.querySelector<HTMLButtonElement>(
+			".pm-mermaid-diagram",
+		);
+
+		await act(async () => {
+			viewport?.dispatchEvent(pointerEvent("pointerdown", 100, 100));
+			window.dispatchEvent(pointerEvent("pointermove", 140, 130));
+			window.dispatchEvent(pointerEvent("pointerup", 140, 130));
+			diagram?.click();
+		});
+		expect(editor.state.selection.from).toBe(1);
+
+		await act(async () => {
+			viewport?.dispatchEvent(pointerEvent("pointerdown", 100, 100));
+			window.dispatchEvent(pointerEvent("pointermove", 101, 101));
+			window.dispatchEvent(pointerEvent("pointerup", 101, 101));
+			diagram?.click();
+		});
+		expect(editor.state.selection.from).toBe(codeBlockRange(editor).from + 1);
+	});
+
+	it("resizes the viewport from the handle and resets on double click", async () => {
+		const { container } = await mountEditor("mermaid");
+		const viewport = container.querySelector<HTMLElement>(
+			".pm-mermaid-viewport",
+		);
+		const handle = container.querySelector<HTMLElement>(".pm-mermaid-resize");
+		expect(viewport?.style.maxHeight).toBe("");
+
+		await act(async () => {
+			handle?.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+			);
+		});
+		expect(viewport?.style.maxHeight).toBe("344px");
+
+		await act(async () => {
+			handle?.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+			);
+		});
+		expect(viewport?.style.maxHeight).toBe("320px");
+
+		await act(async () => {
+			handle?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+		});
+		expect(viewport?.style.maxHeight).toBe("");
+	});
+
 	it("survives a destroy that lands before the render resolves", async () => {
 		const errors: unknown[] = [];
 		let resolveRender: (value: { ok: true; svg: string }) => void = () => {};
@@ -275,10 +363,11 @@ describe("mermaid code block node view", () => {
 });
 
 const MERMAID_SOURCE = "graph TD;\n  A-->B;";
+const MERMAID_SVG = '<svg viewBox="0 0 400 200" width="100%"></svg>';
 
 async function mountEditor(
 	language: string,
-	options: { source?: string; editable?: boolean } = {},
+	options: { source?: string; editable?: boolean; settle?: boolean } = {},
 ) {
 	const source = options.source ?? MERMAID_SOURCE;
 	const editor = new Editor({
@@ -306,9 +395,11 @@ async function mountEditor(
 	await act(async () => {
 		root.render(<EditorContent editor={editor} />);
 	});
-	await act(async () => {
-		await vi.advanceTimersByTimeAsync(200);
-	});
+	if (options.settle !== false) {
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(200);
+		});
+	}
 	return { container, editor, root };
 }
 
@@ -330,6 +421,19 @@ function codeBlockRange(editor: Editor) {
 function appendToCodeBlock(editor: Editor, text: string) {
 	const end = codeBlockRange(editor).to - 1;
 	editor.view.dispatch(editor.state.tr.insertText(text, end, end));
+}
+
+function control(container: HTMLElement, label: string) {
+	return container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`);
+}
+
+function label(container: HTMLElement) {
+	return control(container, "Reset diagram zoom");
+}
+
+/** happy-dom has no PointerEvent, and the node view only reads mouse fields. */
+function pointerEvent(type: string, clientX: number, clientY: number) {
+	return new MouseEvent(type, { bubbles: true, clientX, clientY, button: 0 });
 }
 
 function selectInsideCodeBlock(editor: Editor) {

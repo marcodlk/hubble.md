@@ -12,6 +12,8 @@ import { common, createLowlight } from "lowlight";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import MingcuteCheckLine from "~icons/mingcute/check-line";
 import MingcuteCopy2Line from "~icons/mingcute/copy-2-line";
+import MingcuteZoomInLine from "~icons/mingcute/zoom-in-line";
+import MingcuteZoomOutLine from "~icons/mingcute/zoom-out-line";
 import { Button } from "../primitives/button";
 import { isDarkMode, subscribeDarkMode } from "./darkMode";
 import { renderMermaidDiagram } from "./mermaidRenderer";
@@ -19,6 +21,14 @@ import { renderMermaidDiagram } from "./mermaidRenderer";
 const DEFAULT_TAB_SIZE = 4;
 const MERMAID_LANGUAGE = "mermaid";
 const MERMAID_DEBOUNCE_MS = 150;
+const MERMAID_ZOOM_STEP = 1.25;
+const MERMAID_MIN_ZOOM = 0.25;
+const MERMAID_MAX_ZOOM = 4;
+const MERMAID_PAN_THRESHOLD_PX = 4;
+const MERMAID_MIN_HEIGHT_PX = 96;
+const MERMAID_MAX_HEIGHT_PX = 4000;
+const MERMAID_FALLBACK_HEIGHT_PX = 320;
+const MERMAID_HEIGHT_STEP_PX = 24;
 const TWO_SPACE_LANGUAGES = new Set([
 	"css",
 	"html",
@@ -240,6 +250,8 @@ type MermaidState = {
 	message?: string;
 };
 
+type NaturalSize = { width: number; height: number };
+
 function MermaidDiagramSection({
 	editor,
 	node,
@@ -253,7 +265,18 @@ function MermaidDiagramSection({
 		selector: ({ editor: current }) => current.isEditable,
 	});
 	const [state, setState] = useState<MermaidState>({ status: "idle" });
-	const containerRef = useRef<HTMLButtonElement | null>(null);
+	// `null` is the fit zoom: the svg stays constrained to the viewport width.
+	const [zoom, setZoom] = useState<number | null>(null);
+	const [natural, setNatural] = useState<NaturalSize | null>(null);
+	// Zoom and height are view state only; the document keeps just `language`.
+	const [maxHeight, setMaxHeight] = useState<number | null>(null);
+	const canvasRef = useRef<HTMLSpanElement | null>(null);
+	const viewportRef = useRef<HTMLDivElement | null>(null);
+	// The pan and scroll effects have to re-run once the viewport mounts behind
+	// the loading placeholder, which a bare ref would not tell them.
+	const [viewportReady, setViewportReady] = useState(false);
+	const anchorRef = useRef<{ x: number; y: number } | null>(null);
+	const renderedRef = useRef(false);
 
 	useEffect(() => {
 		if (active) return;
@@ -263,7 +286,7 @@ function MermaidDiagramSection({
 		}
 		let cancelled = false;
 		setState((previous) => ({ ...previous, status: "loading" }));
-		const timer = setTimeout(() => {
+		const render = () => {
 			void renderMermaidDiagram(source, dark).then((result) => {
 				if (cancelled) return;
 				setState((previous) =>
@@ -276,7 +299,17 @@ function MermaidDiagramSection({
 							},
 				);
 			});
-		}, MERMAID_DEBOUNCE_MS);
+		};
+		// The first paint usually hits the renderer cache, so debouncing it would
+		// only flash the placeholder when a note reopens.
+		if (!renderedRef.current) {
+			renderedRef.current = true;
+			render();
+			return () => {
+				cancelled = true;
+			};
+		}
+		const timer = setTimeout(render, MERMAID_DEBOUNCE_MS);
 		return () => {
 			cancelled = true;
 			clearTimeout(timer);
@@ -284,12 +317,119 @@ function MermaidDiagramSection({
 	}, [source, dark, active]);
 
 	useEffect(() => {
-		const container = containerRef.current;
-		if (!container) return;
+		const canvas = canvasRef.current;
+		if (!canvas) return;
 		// The renderer sanitizes mermaid's output, so this stays the one place the
 		// editor trusts a string as markup.
-		container.innerHTML = state.svg ?? "";
+		canvas.innerHTML = state.svg ?? "";
+		const svg = canvas.querySelector("svg");
+		setNatural(svg ? measureNaturalSize(svg) : null);
 	}, [state.svg]);
+
+	useEffect(() => {
+		const viewport = viewportReady ? viewportRef.current : null;
+		if (!viewport) return;
+		const anchor = anchorRef.current;
+		anchorRef.current = null;
+		if (zoom === null) {
+			viewport.scrollLeft = 0;
+			viewport.scrollTop = 0;
+			return;
+		}
+		if (!anchor) return;
+		viewport.scrollLeft = Math.max(0, anchor.x);
+		viewport.scrollTop = Math.max(0, anchor.y);
+	}, [zoom, viewportReady]);
+
+	useEffect(() => {
+		const viewport = viewportReady ? viewportRef.current : null;
+		if (!viewport) return;
+		let panning = false;
+		let travelled = 0;
+		let lastX = 0;
+		let lastY = 0;
+		let captured: number | undefined;
+		let suppressClick = false;
+
+		const onWheel = (event: WheelEvent) => {
+			// A trackpad pinch reaches the page as a ctrl-modified wheel event.
+			if (!event.ctrlKey && !event.metaKey) return;
+			event.preventDefault();
+			const from = zoom ?? 1;
+			const next = clampZoom(
+				from * (event.deltaY < 0 ? MERMAID_ZOOM_STEP : 1 / MERMAID_ZOOM_STEP),
+			);
+			if (next === from) return;
+			const rect = viewport.getBoundingClientRect();
+			const offsetX = event.clientX - rect.left;
+			const offsetY = event.clientY - rect.top;
+			const ratio = next / from;
+			anchorRef.current = {
+				x: (viewport.scrollLeft + offsetX) * ratio - offsetX,
+				y: (viewport.scrollTop + offsetY) * ratio - offsetY,
+			};
+			setZoom(next);
+		};
+
+		const onPointerDown = (event: PointerEvent) => {
+			if (event.button !== 0) return;
+			panning = true;
+			travelled = 0;
+			suppressClick = false;
+			lastX = event.clientX;
+			lastY = event.clientY;
+			viewport.dataset.panning = "true";
+			if (typeof event.pointerId === "number") {
+				viewport.setPointerCapture?.(event.pointerId);
+				captured = event.pointerId;
+			}
+		};
+
+		const onPointerMove = (event: PointerEvent) => {
+			if (!panning) return;
+			const deltaX = event.clientX - lastX;
+			const deltaY = event.clientY - lastY;
+			lastX = event.clientX;
+			lastY = event.clientY;
+			travelled += Math.abs(deltaX) + Math.abs(deltaY);
+			viewport.scrollLeft -= deltaX;
+			viewport.scrollTop -= deltaY;
+		};
+
+		const onPointerUp = () => {
+			if (!panning) return;
+			panning = false;
+			delete viewport.dataset.panning;
+			if (captured !== undefined) {
+				viewport.releasePointerCapture?.(captured);
+				captured = undefined;
+			}
+			// A pan that ended on the diagram must not also open the source.
+			suppressClick = travelled > MERMAID_PAN_THRESHOLD_PX;
+		};
+
+		const onClickCapture = (event: MouseEvent) => {
+			if (!suppressClick) return;
+			suppressClick = false;
+			event.preventDefault();
+			event.stopPropagation();
+		};
+
+		viewport.addEventListener("wheel", onWheel, { passive: false });
+		viewport.addEventListener("pointerdown", onPointerDown);
+		viewport.addEventListener("click", onClickCapture, true);
+		window.addEventListener("pointermove", onPointerMove);
+		window.addEventListener("pointerup", onPointerUp);
+		window.addEventListener("pointercancel", onPointerUp);
+		return () => {
+			viewport.removeEventListener("wheel", onWheel);
+			viewport.removeEventListener("pointerdown", onPointerDown);
+			viewport.removeEventListener("click", onClickCapture, true);
+			window.removeEventListener("pointermove", onPointerMove);
+			window.removeEventListener("pointerup", onPointerUp);
+			window.removeEventListener("pointercancel", onPointerUp);
+		};
+	}, [zoom, viewportReady]);
 
 	if (state.svg === undefined) {
 		return (
@@ -308,24 +448,151 @@ function MermaidDiagramSection({
 		);
 	}
 
+	const scale = zoom ?? 1;
+	const sized = zoom !== null && natural !== null;
+
 	return (
 		<div className="pm-mermaid-section" contentEditable={false}>
-			<button
-				type="button"
-				className="pm-mermaid-diagram"
-				aria-label="Edit mermaid source"
-				// A read-only editor has no source to move the caret into, so the
-				// diagram must not sit in the tab order offering an inert control.
-				disabled={!editable}
-				ref={containerRef}
-				onClick={() => {
-					const pos = getPos();
-					if (pos === undefined) return;
-					editor
-						.chain()
-						.focus()
-						.setTextSelection(pos + 1)
-						.run();
+			<div
+				className="pm-mermaid-viewport"
+				ref={(element) => {
+					viewportRef.current = element;
+					setViewportReady(element !== null);
+				}}
+				style={maxHeight === null ? undefined : { maxHeight }}
+			>
+				<button
+					type="button"
+					className="pm-mermaid-diagram"
+					aria-label="Edit mermaid source"
+					// A read-only editor has no source to move the caret into, so the
+					// diagram must not sit in the tab order offering an inert control.
+					disabled={!editable}
+					onClick={() => {
+						const pos = getPos();
+						if (pos === undefined) return;
+						editor
+							.chain()
+							.focus()
+							.setTextSelection(pos + 1)
+							.run();
+					}}
+				>
+					<span
+						className="pm-mermaid-sizer"
+						style={
+							sized
+								? {
+										width: natural.width * scale,
+										height: natural.height * scale,
+									}
+								: undefined
+						}
+					>
+						<span
+							className="pm-mermaid-canvas"
+							ref={canvasRef}
+							data-zoomed={zoom === null ? undefined : "true"}
+							style={
+								zoom === null
+									? undefined
+									: {
+											width: natural?.width,
+											height: natural?.height,
+											transform: `scale(${scale})`,
+											transformOrigin: "top left",
+										}
+							}
+						/>
+					</span>
+				</button>
+			</div>
+			<div className="pm-mermaid-controls">
+				<Button
+					type="button"
+					variant="ghost"
+					size="icon-xs"
+					aria-label="Zoom out diagram"
+					title="Zoom out"
+					className="size-4"
+					onClick={() => setZoom(clampZoom(scale / MERMAID_ZOOM_STEP))}
+				>
+					<MingcuteZoomOutLine className="size-3.5" />
+				</Button>
+				<Button
+					type="button"
+					variant="ghost"
+					size="xs"
+					aria-label="Reset diagram zoom"
+					title="Reset zoom"
+					className="pm-mermaid-zoom-label h-4"
+					onClick={() => setZoom(null)}
+				>
+					{zoom === null ? "Fit" : `${Math.round(zoom * 100)}%`}
+				</Button>
+				<Button
+					type="button"
+					variant="ghost"
+					size="icon-xs"
+					aria-label="Zoom in diagram"
+					title="Zoom in"
+					className="size-4"
+					onClick={() => setZoom(clampZoom(scale * MERMAID_ZOOM_STEP))}
+				>
+					<MingcuteZoomInLine className="size-3.5" />
+				</Button>
+			</div>
+			{/* An <hr> so the drag handle carries the separator role natively. */}
+			<hr
+				className="pm-mermaid-resize"
+				aria-orientation="horizontal"
+				aria-label="Resize diagram"
+				aria-valuenow={maxHeight ?? MERMAID_FALLBACK_HEIGHT_PX}
+				aria-valuemin={MERMAID_MIN_HEIGHT_PX}
+				aria-valuemax={MERMAID_MAX_HEIGHT_PX}
+				tabIndex={0}
+				onDoubleClick={() => setMaxHeight(null)}
+				onKeyDown={(event) => {
+					if (event.key === "ArrowDown") {
+						setMaxHeight(
+							clampHeight(
+								currentHeight(viewportRef.current, maxHeight) +
+									MERMAID_HEIGHT_STEP_PX,
+							),
+						);
+					} else if (event.key === "ArrowUp") {
+						setMaxHeight(
+							clampHeight(
+								currentHeight(viewportRef.current, maxHeight) -
+									MERMAID_HEIGHT_STEP_PX,
+							),
+						);
+					} else if (event.key === "Escape") {
+						setMaxHeight(null);
+					} else {
+						return;
+					}
+					event.preventDefault();
+				}}
+				onPointerDown={(event) => {
+					if (event.button !== 0) return;
+					const startY = event.clientY;
+					const startHeight = currentHeight(viewportRef.current, maxHeight);
+					const handle = event.currentTarget;
+					if (typeof event.pointerId === "number") {
+						handle.setPointerCapture?.(event.pointerId);
+					}
+					const onMove = (move: PointerEvent) => {
+						setMaxHeight(clampHeight(startHeight + move.clientY - startY));
+					};
+					const onUp = () => {
+						window.removeEventListener("pointermove", onMove);
+						window.removeEventListener("pointerup", onUp);
+						window.removeEventListener("pointercancel", onUp);
+					};
+					window.addEventListener("pointermove", onMove);
+					window.addEventListener("pointerup", onUp);
+					window.addEventListener("pointercancel", onUp);
 				}}
 			/>
 			{state.status === "error" ? (
@@ -333,6 +600,63 @@ function MermaidDiagramSection({
 			) : null}
 		</div>
 	);
+}
+
+function clampZoom(value: number) {
+	return Math.min(
+		MERMAID_MAX_ZOOM,
+		Math.max(MERMAID_MIN_ZOOM, Math.round(value * 100) / 100),
+	);
+}
+
+function clampHeight(value: number) {
+	return Math.min(
+		MERMAID_MAX_HEIGHT_PX,
+		Math.max(MERMAID_MIN_HEIGHT_PX, Math.round(value)),
+	);
+}
+
+function currentHeight(
+	viewport: HTMLDivElement | null,
+	maxHeight: number | null,
+) {
+	if (maxHeight !== null) return maxHeight;
+	return viewport?.offsetHeight || MERMAID_FALLBACK_HEIGHT_PX;
+}
+
+/**
+ * Mermaid sizes its svg in viewBox units, so the intrinsic size is readable
+ * without layout — which also keeps zooming honest before the first paint.
+ */
+function measureNaturalSize(svg: Element): NaturalSize | null {
+	const viewBox = svg
+		.getAttribute("viewBox")
+		?.split(/[\s,]+/)
+		.map(Number);
+	if (
+		viewBox?.length === 4 &&
+		viewBox.every((value) => Number.isFinite(value))
+	) {
+		const [, , width, height] = viewBox;
+		if (width > 0 && height > 0) return { width, height };
+	}
+	const widthAttribute = svg.getAttribute("width") ?? "";
+	const heightAttribute = svg.getAttribute("height") ?? "";
+	const width = Number.parseFloat(widthAttribute);
+	const height = Number.parseFloat(heightAttribute);
+	if (
+		width > 0 &&
+		height > 0 &&
+		!widthAttribute.includes("%") &&
+		!heightAttribute.includes("%")
+	) {
+		return { width, height };
+	}
+	const rect = svg.getBoundingClientRect?.();
+	if (rect && rect.width > 0 && rect.height > 0) {
+		return { width: rect.width, height: rect.height };
+	}
+	return null;
 }
 
 function languageLabel(value: string) {
