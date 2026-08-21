@@ -94,7 +94,3 @@ export function renderMermaidDiagram(
 	queue = result;
 	return result;
 }
-
-export function clearMermaidCacheForTests() {
-	cache.clear();
-}

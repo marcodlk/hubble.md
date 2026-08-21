@@ -36,6 +36,38 @@ describe("renderMermaidDiagram", () => {
 		});
 	});
 
+	it("initializes mermaid with the hardened config", async () => {
+		const { renderMermaidDiagram } = await importRenderer();
+
+		await renderMermaidDiagram("graph TD; A-->B;", false);
+
+		expect(mermaid.initialize).toHaveBeenCalledWith({
+			startOnLoad: false,
+			securityLevel: "strict",
+			suppressErrorRendering: true,
+			htmlLabels: false,
+			flowchart: { htmlLabels: false },
+			theme: "default",
+			maxTextSize: 50_000,
+			maxEdges: 500,
+			secure: [
+				"secure",
+				"securityLevel",
+				"startOnLoad",
+				"maxTextSize",
+				"suppressErrorRendering",
+				"maxEdges",
+				"theme",
+				"themeVariables",
+				"fontFamily",
+				"look",
+			],
+		});
+		expect(mermaid.initialize.mock.invocationCallOrder[0]).toBeLessThan(
+			mermaid.render.mock.invocationCallOrder[0] ?? 0,
+		);
+	});
+
 	it("reports parse errors without rendering", async () => {
 		const { renderMermaidDiagram } = await importRenderer();
 		mermaid.parse.mockRejectedValue(new Error("Parse error on line 1"));
@@ -65,6 +97,22 @@ describe("renderMermaidDiagram", () => {
 
 		expect(second).toEqual({ ok: true, svg: "<svg>clean</svg>" });
 		expect(mermaid.render).toHaveBeenCalledTimes(1);
+	});
+
+	it("evicts the oldest cache entry once the cache is full", async () => {
+		const { renderMermaidDiagram } = await importRenderer();
+
+		for (let i = 0; i < 50; i++) {
+			await renderMermaidDiagram(`graph TD; A-->N${i};`, false);
+		}
+		await renderMermaidDiagram("graph TD; A-->N50;", false);
+		expect(mermaid.render).toHaveBeenCalledTimes(51);
+
+		await renderMermaidDiagram("graph TD; A-->N49;", false);
+		expect(mermaid.render).toHaveBeenCalledTimes(51);
+
+		await renderMermaidDiagram("graph TD; A-->N0;", false);
+		expect(mermaid.render).toHaveBeenCalledTimes(52);
 	});
 
 	it("re-initializes and re-renders when the theme flips", async () => {
