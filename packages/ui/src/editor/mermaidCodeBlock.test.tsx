@@ -251,7 +251,7 @@ describe("mermaid code block node view", () => {
 		const { container } = await mountEditor("mermaid");
 		const sizer = container.querySelector<HTMLElement>(".pm-mermaid-sizer");
 		const canvas = container.querySelector<HTMLElement>(".pm-mermaid-canvas");
-		expect(label(container)?.textContent).toBe("Fit");
+		expect(label(container)?.textContent).toBe("100%");
 		expect(canvas?.style.transform).toBe("");
 
 		await act(async () => {
@@ -269,9 +269,17 @@ describe("mermaid code block node view", () => {
 			control(container, "Reset diagram zoom")?.click();
 		});
 
-		expect(label(container)?.textContent).toBe("Fit");
+		expect(label(container)?.textContent).toBe("100%");
 		expect(canvas?.style.transform).toBe("");
 		expect(sizer?.style.width).toBe("");
+	});
+
+	it("pins the svg to its natural width so it draws at true scale", async () => {
+		const { container } = await mountEditor("mermaid");
+		const svg = container.querySelector<SVGElement>(".pm-mermaid-canvas svg");
+		// Mermaid emits width="100%", which collapses to the 300px svg default
+		// inside the max-content canvas; the natural viewBox width must win.
+		expect(svg?.style.inlineSize).toBe("400px");
 	});
 
 	it("steps out from the scale a fitted diagram is drawn at", async () => {

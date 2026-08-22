@@ -265,7 +265,8 @@ function MermaidDiagramSection({
 		selector: ({ editor: current }) => current.isEditable,
 	});
 	const [state, setState] = useState<MermaidState>({ status: "idle" });
-	// `null` is the fit zoom: the svg stays constrained to the viewport width.
+	// `null` is the default zoom: the svg draws at its natural size and the
+	// viewport scrolls whatever overflows.
 	const [zoom, setZoom] = useState<number | null>(null);
 	const [natural, setNatural] = useState<NaturalSize | null>(null);
 	// Zoom and height are view state only; the document keeps just `language`.
@@ -323,7 +324,12 @@ function MermaidDiagramSection({
 		// editor trusts a string as markup.
 		canvas.innerHTML = state.svg ?? "";
 		const svg = canvas.querySelector("svg");
-		setNatural(svg ? measureNaturalSize(svg) : null);
+		const size = svg ? measureNaturalSize(svg) : null;
+		// Mermaid emits width="100%", which cannot resolve inside the max-content
+		// canvas and collapses to the 300px svg default; pin the natural width so
+		// fit mode draws at true scale and only shrinks past the viewport.
+		if (svg && size) svg.style.inlineSize = `${size.width}px`;
+		setNatural(size);
 	}, [state.svg]);
 
 	useEffect(() => {
@@ -539,7 +545,7 @@ function MermaidDiagramSection({
 					className="pm-mermaid-zoom-label h-4"
 					onClick={() => setZoom(null)}
 				>
-					{zoom === null ? "Fit" : `${Math.round(zoom * 100)}%`}
+					{zoom === null ? "100%" : `${Math.round(zoom * 100)}%`}
 				</Button>
 				<Button
 					type="button"
@@ -621,9 +627,8 @@ function MermaidDiagramSection({
 }
 
 /**
- * The scale the diagram is drawn at right now. Fit mode has no transform: the
- * svg is capped at the viewport width, so a step has to start from the scale
- * the reader sees or "zoom out" would grow a diagram that was scaled down.
+ * The scale the diagram is drawn at right now. The default has no transform,
+ * so a step has to start from the scale the reader sees, not an assumed 100%.
  */
 function displayedScale(
 	canvas: HTMLElement | null,
